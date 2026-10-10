@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>codearts2api</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div>
+          <div class="brand-name">codearts2api</div>
+          <div class="brand-sub">Local Gateway</div>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-item active" data-view="dashboard">
+          <svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+          Dashboard
+        </button>
+        <button class="nav-item" data-view="playground">
+          <svg viewBox="0 0 24 24"><path d="m7 8 4 4-4 4m6 0h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
+          Playground
+        </button>
+        <button class="nav-item" data-view="logs">
+          <svg viewBox="0 0 24 24"><path d="M6 4h12M6 9h12M6 14h8M6 19h5"/></svg>
+          Logs
+        </button>
+        <button class="nav-item" data-view="settings">
+          <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.05a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+          Settings
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="runtime-row">
+          <span class="status-dot" id="runtimeDot"></span>
+          <span id="runtimeText">Checking service…</span>
+        </div>
+        <div class="version" id="versionText">v—</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow" id="pageEyebrow">OVERVIEW</div>
+          <h1 id="pageTitle">Dashboard</h1>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button" id="refreshAllBtn" title="刷新">
+            <svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.7 6.7L4 11m16 2-2.7 4.3A7 7 0 0 1 5.8 15"/></svg>
+          </button>
+          <button class="button primary small" id="topLoginBtn">Login CodeArts</button>
+        </div>
+      </header>
+
+      <div id="apiKeyBanner" class="banner hidden">
+        <div>
+          <strong>Local API Key 已启用</strong>
+          <span>输入本地网关 API Key 后才能读取账号状态和调用模型。</span>
+        </div>
+        <button class="button ghost small" data-goto="settings">Configure</button>
+      </div>
+
+      <section class="view active" id="view-dashboard">
+        <div class="hero-grid">
+          <article class="card account-card">
+            <div class="card-head">
+              <div>
+                <div class="label">CODEARTS ACCOUNT</div>
+                <h2>Authentication</h2>
+              </div>
+              <span class="pill neutral" id="authPill">Checking</span>
+            </div>
+            <div class="account-main">
+              <div class="avatar" id="accountAvatar">CA</div>
+              <div class="account-copy">
+                <div class="account-name" id="accountName">Not connected</div>
+                <div class="muted" id="accountMeta">Sign in with your Huawei Cloud account</div>
+              </div>
+            </div>
+            <div class="stats-row">
+              <div class="mini-stat">
+                <span>Source</span>
+                <strong id="authSource">—</strong>
+              </div>
+              <div class="mini-stat">
+                <span>Expires</span>
+                <strong id="authExpiry">—</strong>
+              </div>
+              <div class="mini-stat">
+                <span>Refresh</span>
+                <strong id="authRefresh">—</strong>
+              </div>
+            </div>
+            <div class="button-row">
+              <button class="button primary" id="loginBtn">Login CodeArts</button>
+              <button class="button ghost hidden" id="refreshTokenBtn">Refresh token</button>
+              <button class="button danger ghost hidden" id="logoutBtn">Logout</button>
+            </div>
+          </article>
+
+          <article class="card endpoint-card">
+            <div class="card-head">
+              <div>
+                <div class="label">OPENAI COMPATIBLE</div>
+                <h2>API Endpoint</h2>
+              </div>
+              <span class="pill success">Ready</span>
+            </div>
+            <div class="endpoint-box">
+              <span id="apiBaseUrl">http://127.0.0.1:8000/v1</span>
+              <button class="copy-button" data-copy-target="apiBaseUrl">Copy</button>
+            </div>
+            <p class="muted compact">OpenAI SDK、Cherry Studio 等客户端可直接指向此地址。</p>
+            <div class="code-preview">
+              <div class="code-title"><span>Python / OpenAI</span><button class="text-button" id="copyPythonBtn">Copy</button></div>
+              <pre id="pythonSnippet">from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
+            </div>
+          </article>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric-card">
+            <div class="metric-icon purple"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="m8 10 2 2-2 2m5 0h3"/></svg></div>
+            <div><span>Gateway</span><strong id="gatewayStatus">Online</strong><small id="gatewaySub">FastAPI local service</small></div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-icon cyan"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Z"/><path d="m4 7 8 4 8-4M12 11v10"/></svg></div>
+            <div><span>Models</span><strong id="modelCount">—</strong><small>Configured aliases</small></div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-icon green"><svg viewBox="0 0 24 24"><path d="M7 12.5 10 16l7-8"/><circle cx="12" cy="12" r="9"/></svg></div>
+            <div><span>Upstream</span><strong id="upstreamState">Configured</strong><small id="upstreamHost">—</small></div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-icon amber"><svg viewBox="0 0 24 24"><path d="M12 3v18M8 7h6.5a3 3 0 0 1 0 6H9.5a3 3 0 0 0 0 6H16"/></svg></div>
+            <div><span>Local API Key</span><strong id="apiKeyState">—</strong><small>Gateway access protection</small></div>
+          </article>
+        </div>
+
+        <div class="content-grid">
+          <article class="card">
+            <div class="card-head">
+              <div><div class="label">AVAILABLE</div><h2>Models</h2></div>
+              <button class="text-button" data-goto="playground">Open Playground →</button>
+            </div>
+            <div class="model-list" id="modelList">
+              <div class="skeleton line"></div><div class="skeleton line"></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="card-head">
+              <div><div class="label">QUICK START</div><h2>Client configuration</h2></div>
+            </div>
+            <div class="config-list">
+              <div class="config-row"><span>Base URL</span><code id="configBase">/v1</code></div>
+              <div class="config-row"><span>API format</span><code>OpenAI Chat Completions</code></div>
+              <div class="config-row"><span>Streaming</span><code>Server-Sent Events</code></div>
+              <div class="config-row"><span>Authentication</span><code id="configAuth">None (localhost)</code></div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-playground">
+        <div class="playground-grid">
+          <article class="card composer-card">
+            <div class="card-head">
+              <div><div class="label">REQUEST</div><h2>Chat Completions</h2></div>
+              <span class="pill neutral">stream: true</span>
+            </div>
+            <label class="field-label" for="modelSelect">Model</label>
+            <select class="input" id="modelSelect"><option value="codearts-auto">codearts-auto</option></select>
+
+            <label class="field-label" for="systemPrompt">System prompt <span>optional</span></label>
+            <textarea class="input textarea small-area" id="systemPrompt" placeholder="You are a helpful coding assistant."></textarea>
+
+            <label class="field-label" for="userPrompt">Message</label>
+            <textarea class="input textarea" id="userPrompt" placeholder="向 CodeArts 发送一条消息…"></textarea>
+            <div class="composer-actions">
+              <span class="muted" id="playgroundHint">Ctrl + Enter to send</span>
+              <button class="button primary" id="sendBtn">
+                <svg viewBox="0 0 24 24"><path d="m4 4 17 8-17 8 3-8-3-8Z"/><path d="M7 12h14"/></svg>
+                Send
+              </button>
+            </div>
+          </article>
+
+          <article class="card response-card">
+            <div class="card-head">
+              <div><div class="label">RESPONSE</div><h2>Live output</h2></div>
+              <div class="response-meta"><span class="status-dot" id="streamDot"></span><span id="streamState">Idle</span></div>
+            </div>
+            <div class="response-output empty" id="responseOutput">Response will stream here.</div>
+            <div class="response-foot">
+              <span id="responseTime">—</span>
+              <button class="text-button" id="copyResponseBtn">Copy response</button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-logs">
+        <article class="card logs-card">
+          <div class="card-head">
+            <div><div class="label">ACTIVITY</div><h2>Request logs</h2></div>
+            <div class="button-row no-margin">
+              <span class="muted">Sanitized · no bodies or credentials</span>
+              <button class="button ghost small" id="refreshLogsBtn">Refresh</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th></tr></thead>
+              <tbody id="logsBody"><tr><td colspan="5" class="empty-cell">No requests yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="settings-grid">
+          <article class="card">
+            <div class="card-head"><div><div class="label">SECURITY</div><h2>Local API Key</h2></div></div>
+            <p class="muted">如果 `.env` 中配置了 <code>CODEARTS2API_API_KEY</code>，在这里输入相同的 Key。它仅保存在当前浏览器的 localStorage。</p>
+            <label class="field-label" for="localApiKey">API Key</label>
+            <div class="input-row">
+              <input class="input" id="localApiKey" type="password" autocomplete="off" placeholder="sk-local-…" />
+              <button class="button primary" id="saveApiKeyBtn">Save</button>
+              <button class="button ghost" id="clearApiKeyBtn">Clear</button>
+            </div>
+            <div class="setting-status" id="apiKeySettingStatus">Not configured in browser.</div>
+          </article>
+          <article class="card">
+            <div class="card-head"><div><div class="label">SYSTEM</div><h2>Gateway details</h2></div></div>
+            <div class="config-list">
+              <div class="config-row"><span>Version</span><code id="settingsVersion">—</code></div>
+              <div class="config-row"><span>Upstream</span><code id="settingsUpstream">—</code></div>
+              <div class="config-row"><span>OAuth callback</span><code id="settingsCallback">—</code></div>
+              <div class="config-row"><span>OpenAPI</span><a href="/docs" target="_blank">/docs ↗</a></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toastStack"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
