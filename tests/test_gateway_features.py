@@ -97,14 +97,13 @@ def test_conversation_store_reuses_full_openai_history_without_storing_prompts(t
         account_id="a",
         environment=ENV_CN,
         chat_id="chat-1",
-        response_message_id="message-1",
         messages=first_messages,
         assistant_text="secret answer",
     )
     raw = store.path(context["id"]).read_text(encoding="utf-8")
     assert "secret question 731" not in raw
     assert "secret answer" not in raw
-    assert completed["parent_message_id"] == "message-1"
+    assert completed["chat_id"] == "chat-1"
 
     second = store.resolve(
         [
@@ -115,7 +114,7 @@ def test_conversation_store_reuses_full_openai_history_without_storing_prompts(t
     )
     assert second["id"] == context["id"]
     assert second["chat_id"] == "chat-1"
-    assert second["parent_message_id"] == "message-1"
+    assert "parent_message_id" not in second
 
 
 def test_model_catalog_extracts_builtin_and_third_party_shapes(tmp_path) -> None:
@@ -199,7 +198,8 @@ def test_gateway_fails_over_and_marks_health(monkeypatch, tmp_path) -> None:
     saved = ConversationStore(settings).get(context["id"])
     assert saved is not None
     assert saved["account_id"] == "b"
-    assert saved["parent_message_id"] == "response-b"
+    assert saved["chat_id"]
+    assert "parent_message_id" not in saved
 
 
 def test_transient_network_error_retries_same_account_before_cooldown(monkeypatch, tmp_path) -> None:
@@ -239,7 +239,7 @@ def test_transient_network_error_retries_same_account_before_cooldown(monkeypatc
     assert health["total_failures"] == 0
 
 
-def test_gateway_reuses_bound_account_chat_and_parent(monkeypatch, tmp_path) -> None:
+def test_gateway_reuses_bound_account_chat_id_and_full_messages(monkeypatch, tmp_path) -> None:
     settings = _settings(tmp_path)
     manager = AuthManager(settings)
     manager.pool.save(_record("a", ENV_CN), "a")
@@ -273,8 +273,9 @@ def test_gateway_reuses_bound_account_chat_and_parent(monkeypatch, tmp_path) -> 
     asyncio.run(gateway.complete(messages=second, model="codearts-auto", user=None, context=context2))
 
     assert calls[1]["chat_id"] == calls[0]["chat_id"]
-    assert calls[1]["parent_message_id"] == "message-1"
-    assert calls[1]["native_continuation"] is True
+    assert calls[1]["messages"] == second
+    assert "parent_message_id" not in calls[1]
+    assert "native_continuation" not in calls[1]
 
 
 def test_streaming_fails_over_before_first_delta(monkeypatch, tmp_path) -> None:
@@ -315,7 +316,10 @@ def test_streaming_fails_over_before_first_delta(monkeypatch, tmp_path) -> None:
             user=None,
             context=context,
         ):
-            parts.append(part)
+            delta = part.get("delta") if isinstance(part, dict) else {}
+            content = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(content, str):
+                parts.append(content)
         return "".join(parts)
 
     assert asyncio.run(collect()) == "Hello"

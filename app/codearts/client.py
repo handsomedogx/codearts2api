@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import uuid
 from typing import Any, AsyncIterator
 from urllib.parse import urlencode
@@ -9,8 +10,22 @@ import httpx
 from app.codearts.auth import ActiveCredentials, AuthManager, get_auth_manager
 from app.codearts.errors import CodeArtsUpstreamError, classify_status
 from app.codearts.signer import sign_request
-from app.codearts.sse import TextDeltaTracker, decode_payload, parse_sse
+from app.codearts.sse import decode_payload, parse_sse
 from app.config import Settings
+
+
+V2_OPTION_KEYS = (
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "reasoning_effort",
+    "tools",
+    "tool_choice",
+    "stop",
+    "presence_penalty",
+    "frequency_penalty",
+    "response_format",
+)
 
 
 class CodeArtsClient:
@@ -30,123 +45,68 @@ class CodeArtsClient:
         self.account_id = account_id
         self._credentials = credentials
         self.chat_url = settings.chat_url_for(self.environment)
-        self.last_response_message_id = ""
         self.last_chat_id = ""
         self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self.last_usage_details: dict[str, Any] = {}
+        self.last_reasoning_content = ""
+        self.last_tool_calls: list[dict[str, Any]] = []
+        self.last_finish_reason = "stop"
+        self._tool_call_parts: dict[int, dict[str, Any]] = {}
 
-    def _headers(self, *, agent_type: str = "ChatAgent", accept: str = "text/event-stream") -> dict[str, str]:
-        return {
+    def _headers(self, *, agent_type: str = "PromptCenter", accept: str = "application/json") -> dict[str, str]:
+        headers = {
             "Content-Type": "application/json",
             "Accept": accept,
             "client_version": self.settings.client_version,
-            "Agent-Type": agent_type,
             "X-Language": self.settings.language,
             "x-snap-traceid": uuid.uuid4().hex,
             "plugin-name": self.settings.plugin_name,
             "plugin-version": self.settings.plugin_version,
             "ide-name": self.settings.ide_name,
             "ide-version": self.settings.ide_version,
-            "heartbeat-enable": "true",
             "is_confidential": "false",
         }
+        if agent_type:
+            headers["Agent-Type"] = agent_type
+        return headers
 
-    @staticmethod
-    def _message_text(content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            return ""
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-                continue
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") in {None, "text", "input_text"}:
-                value = item.get("text") or item.get("content")
-                if isinstance(value, str):
-                    parts.append(value)
-        return "\n".join(part for part in parts if part)
-
-    @classmethod
-    def _system_prompt(cls, messages: list[dict[str, Any]]) -> str:
-        return "\n\n".join(
-            text
-            for message in messages
-            if str(message.get("role") or "") == "system"
-            if (text := cls._message_text(message.get("content")))
-        )
-
-    @classmethod
-    def _codearts_messages(
-        cls,
-        messages: list[dict[str, Any]],
-        *,
-        native_continuation: bool = False,
-    ) -> list[dict[str, str]]:
-        normalized: list[tuple[str, str]] = []
-        for message in messages:
-            role = str(message.get("role") or "user")
-            if role == "system":
-                continue
-            text = cls._message_text(message.get("content"))
-            if text:
-                normalized.append((role, text))
-
-        if not normalized:
-            system = cls._system_prompt(messages)
-            if system:
-                return [{"type": "text", "content": system}]
-            raise ValueError("At least one textual chat message is required")
-
-        if native_continuation:
-            for role, text in reversed(normalized):
-                if role == "user":
-                    return [{"type": "text", "content": text}]
-            return [{"type": "text", "content": normalized[-1][1]}]
-
-        if len(normalized) == 1 and normalized[0][0] == "user":
-            prompt = normalized[0][1]
-        else:
-            labels = {"user": "User", "assistant": "Assistant", "tool": "Tool"}
-            prompt = "\n\n".join(f"{labels.get(role, role.title())}:\n{text}" for role, text in normalized)
-        return [{"type": "text", "content": prompt}]
+    def _chat_headers(self, credentials: ActiveCredentials) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "X-Language": self.settings.language,
+            "x-snap-traceid": uuid.uuid4().hex,
+            "app-id": "CodeAgent3.0",
+            "is_confidential": "false",
+            "x-auth-token": credentials.security_token,
+        }
 
     def _body(
         self,
         *,
         messages: list[dict[str, Any]],
         model: str,
-        user: str | None = None,
         chat_id: str | None = None,
-        parent_message_id: str | None = None,
-        native_continuation: bool = False,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if not messages:
+            raise ValueError("At least one chat message is required")
         resolved_chat_id = chat_id or uuid.uuid4().hex
-        body: dict[str, Any] = {
-            "chat_id": resolved_chat_id,
-            "messages": self._codearts_messages(messages, native_continuation=native_continuation),
-            "client": "IDE",
-            "task": "chat",
-            "task_parameters": {
-                "ide": self.settings.ide_name,
-                "preferred_language": self.settings.language,
-                "enable_code_interpreter": False,
-                "projectLevelPrompt": self._system_prompt(messages),
-            },
-            "batch_task_parameters": [],
-            "attempt": 1,
-            "mcp_servers": [],
-            "is_delta_response": False,
-            "not_allow_external_model": False,
+        body = {
+            key: copy.deepcopy(value)
+            for key, value in (options or {}).items()
+            if key in V2_OPTION_KEYS and value is not None
         }
-        if user:
-            body["user_id"] = user
-        if parent_message_id:
-            body["parent_message_id"] = parent_message_id
-        if model and model != "codearts-auto":
-            body["model_id"] = model
+        body.update(
+            {
+                "model": model,
+                "stream": True,
+                "messages": copy.deepcopy(messages),
+                "chat_id": resolved_chat_id,
+                "prompt_cache_key": resolved_chat_id,
+                "tool_stream": True,
+            }
+        )
         self.last_chat_id = resolved_chat_id
         return body
 
@@ -184,22 +144,85 @@ class CodeArtsClient:
                     return found
         return None
 
+    @staticmethod
+    def _find_dict(value: Any, key: str) -> dict[str, Any] | None:
+        if isinstance(value, dict):
+            direct = value.get(key)
+            if isinstance(direct, dict):
+                return direct
+            for nested in value.values():
+                found = CodeArtsClient._find_dict(nested, key)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = CodeArtsClient._find_dict(nested, key)
+                if found is not None:
+                    return found
+        return None
+
+    @staticmethod
+    def _merge_dicts(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        merged = copy.deepcopy(current)
+        for key, value in incoming.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = CodeArtsClient._merge_dicts(merged[key], value)
+            else:
+                merged[key] = copy.deepcopy(value)
+        return merged
+
+    def usage_payload(self) -> dict[str, Any]:
+        payload = copy.deepcopy(self.last_usage_details)
+        payload.update(self.last_usage)
+        return payload
+
     def _capture_metadata(self, payload: dict[str, Any] | None) -> None:
         if not payload:
             return
-        response_message_id = self._find_key(payload, "response_message_id")
-        if response_message_id:
-            self.last_response_message_id = response_message_id
         chat_id = self._find_key(payload, "chat_id")
         if chat_id:
             self.last_chat_id = chat_id
+        usage_details = self._find_dict(payload, "usage")
+        if usage_details is not None:
+            self.last_usage_details = self._merge_dicts(self.last_usage_details, usage_details)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             value = self._find_number(payload, key)
             if value is not None:
-                # CodeArts emits zero-valued usage placeholders before the final usage event.
                 self.last_usage[key] = max(int(self.last_usage.get(key, 0)), value)
         if not self.last_usage["total_tokens"] and (self.last_usage["prompt_tokens"] or self.last_usage["completion_tokens"]):
             self.last_usage["total_tokens"] = self.last_usage["prompt_tokens"] + self.last_usage["completion_tokens"]
+        if self.last_usage_details:
+            self.last_usage_details.update(self.last_usage)
+
+    def _capture_delta(self, delta: dict[str, Any]) -> None:
+        reasoning = delta.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            self.last_reasoning_content += reasoning
+        tool_calls = delta.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            return
+        for position, raw in enumerate(tool_calls):
+            if not isinstance(raw, dict):
+                continue
+            index = raw.get("index")
+            index = int(index) if isinstance(index, (int, float)) else position
+            current = self._tool_call_parts.setdefault(
+                index,
+                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            if isinstance(raw.get("id"), str) and raw["id"]:
+                current["id"] = raw["id"]
+            if isinstance(raw.get("type"), str) and raw["type"]:
+                current["type"] = raw["type"]
+            function = raw.get("function")
+            if isinstance(function, dict):
+                name = function.get("name")
+                if isinstance(name, str) and name:
+                    current["function"]["name"] += name
+                arguments = function.get("arguments")
+                if isinstance(arguments, str) and arguments:
+                    current["function"]["arguments"] += arguments
+        self.last_tool_calls = [copy.deepcopy(self._tool_call_parts[index]) for index in sorted(self._tool_call_parts)]
 
     @staticmethod
     def _retry_after(response: httpx.Response) -> float | None:
@@ -218,6 +241,21 @@ class CodeArtsClient:
             category="network",
             retryable=True,
         )
+
+    @staticmethod
+    def _event_error(payload: dict[str, Any]) -> CodeArtsUpstreamError | None:
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("error_msg") or error.get("code") or "CodeArts upstream error"
+            code = str(error.get("code") or "")
+            retryable = "429" in code or "flow" in str(message).lower() or "busy" in str(message).lower()
+            return CodeArtsUpstreamError(str(message), category="upstream_event", retryable=retryable)
+        error_code = payload.get("error_code")
+        if error_code not in (None, "", 0, "0"):
+            message = payload.get("error_msg") or payload.get("message") or f"CodeArts error {error_code}"
+            retryable = "429" in str(error_code) or "flow" in str(message).lower() or "busy" in str(message).lower()
+            return CodeArtsUpstreamError(str(message), category="upstream_event", retryable=retryable)
+        return None
 
     async def get_json(
         self,
@@ -270,29 +308,25 @@ class CodeArtsClient:
         model: str,
         user: str | None = None,
         chat_id: str | None = None,
-        parent_message_id: str | None = None,
-        native_continuation: bool = False,
-    ) -> AsyncIterator[str]:
+        options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         credentials = self._credentials
         if credentials is None and self.account_id:
             credentials = await self._auth_manager.get_account_credentials(self.account_id)
         if credentials is None:
             raise RuntimeError("CodeArts credentials are not configured; add an account first")
 
-        self.last_response_message_id = ""
         self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        body = self._body(
-            messages=messages,
-            model=model,
-            user=user,
-            chat_id=chat_id,
-            parent_message_id=parent_message_id,
-            native_continuation=native_continuation,
-        )
+        self.last_usage_details = {}
+        self.last_reasoning_content = ""
+        self.last_tool_calls = []
+        self.last_finish_reason = "stop"
+        self._tool_call_parts = {}
+        body = self._body(messages=messages, model=model, chat_id=chat_id, options=options)
         signed = sign_request(
             method="POST",
             url=self.chat_url,
-            headers=self._headers(),
+            headers=self._chat_headers(credentials),
             data=body,
             access_key_id=credentials.access_key_id,
             secret_access_key=credentials.secret_access_key,
@@ -300,16 +334,10 @@ class CodeArtsClient:
             domain_id=credentials.domain_id,
         )
 
-        tracker = TextDeltaTracker()
         timeout = httpx.Timeout(connect=20.0, read=300.0, write=30.0, pool=30.0)
         try:
             async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
-                async with client.stream(
-                    "POST",
-                    self.chat_url,
-                    headers=signed.headers,
-                    content=signed.body,
-                ) as response:
+                async with client.stream("POST", self.chat_url, headers=signed.headers, content=signed.body) as response:
                     if response.status_code >= 400:
                         raw = await response.aread()
                         text = raw.decode("utf-8", errors="replace")[:2000]
@@ -324,21 +352,27 @@ class CodeArtsClient:
 
                     async for upstream_event in parse_sse(response.aiter_lines()):
                         event_type, payload = decode_payload(upstream_event)
-                        self._capture_metadata(payload)
-                        try:
-                            delta, done = tracker.extract(event_type, payload)
-                        except RuntimeError as exc:
-                            message = str(exc)
-                            retryable = "429" in message or "flow" in message.lower() or "busy" in message.lower()
-                            raise CodeArtsUpstreamError(
-                                message,
-                                category="upstream_event",
-                                retryable=retryable,
-                            ) from exc
-                        if delta:
-                            yield delta
-                        if done:
+                        if event_type == "done":
                             break
+                        if not isinstance(payload, dict):
+                            continue
+                        self._capture_metadata(payload)
+                        event_error = self._event_error(payload)
+                        if event_error:
+                            raise event_error
+                        choices = payload.get("choices")
+                        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta")
+                        delta = copy.deepcopy(delta) if isinstance(delta, dict) else {}
+                        finish_reason = choice.get("finish_reason")
+                        if isinstance(finish_reason, str) and finish_reason:
+                            self.last_finish_reason = finish_reason
+                        if delta:
+                            self._capture_delta(delta)
+                        if delta or finish_reason is not None:
+                            yield {"delta": delta, "finish_reason": finish_reason}
         except CodeArtsUpstreamError:
             raise
         except httpx.HTTPError as exc:
@@ -351,17 +385,18 @@ class CodeArtsClient:
         model: str,
         user: str | None = None,
         chat_id: str | None = None,
-        parent_message_id: str | None = None,
-        native_continuation: bool = False,
+        options: dict[str, Any] | None = None,
     ) -> str:
         parts: list[str] = []
-        async for delta in self.chat_stream(
+        async for chunk in self.chat_stream(
             messages=messages,
             model=model,
             user=user,
             chat_id=chat_id,
-            parent_message_id=parent_message_id,
-            native_continuation=native_continuation,
+            options=options,
         ):
-            parts.append(delta)
+            delta = chunk.get("delta") if isinstance(chunk, dict) else None
+            content = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(content, str):
+                parts.append(content)
         return "".join(parts)

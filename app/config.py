@@ -53,7 +53,7 @@ class CodeArtsProfile:
 
     @property
     def chat_url(self) -> str:
-        return f"{self.base_url}/v1/chat/chat"
+        return f"{self.base_url}/api/v2/chat/completions"
 
     @property
     def token_url(self) -> str:
@@ -126,8 +126,8 @@ class Settings:
     usage_file: str = os.getenv("CODEARTS_USAGE_FILE", "data/usage.jsonl")
     request_logs_file: str = os.getenv("CODEARTS_REQUEST_LOGS_FILE", "data/request_logs.jsonl")
 
-    default_model: str = os.getenv("CODEARTS_DEFAULT_MODEL", "codearts-auto")
-    models: tuple[str, ...] = _split_csv(os.getenv("CODEARTS_MODELS", "codearts-auto"))
+    default_model: str = os.getenv("CODEARTS_DEFAULT_MODEL", "GLM-5.2")
+    models: tuple[str, ...] = _split_csv(os.getenv("CODEARTS_MODELS", "GLM-5.2"))
 
     client_version: str = os.getenv("CODEARTS_CLIENT_VERSION", "26.7.2")
     plugin_name: str = os.getenv("CODEARTS_PLUGIN_NAME", "codearts-snap_vscode")

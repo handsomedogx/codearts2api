@@ -25,7 +25,7 @@ from app.config import Settings, get_settings, normalize_environment
 from app.gateway_settings import get_gateway_settings_store
 from app.models import ChatCompletionRequest
 
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 @asynccontextmanager
@@ -95,11 +95,18 @@ def _messages(request: ChatCompletionRequest) -> list[dict]:
     return [message.model_dump(exclude_none=True) for message in request.messages]
 
 
+def _chat_options(request: ChatCompletionRequest) -> dict:
+    raw = request.model_dump(exclude_none=True)
+    for key in ("model", "messages", "stream", "stream_options", "user", "conversation_id"):
+        raw.pop(key, None)
+    return raw
+
+
 def _model_list(settings: Settings) -> list[str]:
     items = list(settings.models)
     if settings.default_model not in items:
         items.insert(0, settings.default_model)
-    return items or ["codearts-auto"]
+    return items or ["GLM-5.2"]
 
 
 def _login_environment_or_400(value: str | None, settings: Settings) -> str:
@@ -386,14 +393,30 @@ async def models(
     }
 
 
-def _chunk(completion_id: str, model: str, content: str | None = None, finish_reason: str | None = None) -> str:
-    delta = {} if content is None else {"content": content}
+def _usage_chunk(completion_id: str, model: str, usage: dict) -> str:
     payload = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        "choices": [],
+        "usage": usage,
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _chunk(
+    completion_id: str,
+    model: str,
+    delta: dict | None = None,
+    finish_reason: str | None = None,
+) -> str:
+    payload = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}],
     }
     return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
@@ -415,6 +438,7 @@ async def chat_completions(
     source_ip = _source_ip(raw_request)
     user_agent = raw_request.headers.get("user-agent", "")
     messages = _messages(request)
+    options = _chat_options(request)
     gateway = CodeArtsGateway(settings, auth)
     requested_conversation_id = x_codearts_conversation or request.conversation_id
 
@@ -457,22 +481,36 @@ async def chat_completions(
     conversation_id = str(conversation["id"])
 
     if request.stream:
+        include_usage = bool(request.stream_options and request.stream_options.include_usage)
+
         async def event_stream() -> AsyncIterator[str]:
             completed = False
             error_category = "stream_interrupted"
-            yield _chunk(completion_id, request.model, None, None)
+            finish_seen = False
+            yield _chunk(completion_id, request.model, {"role": "assistant"}, None)
             try:
-                async for delta in gateway.stream(
+                async for upstream_chunk in gateway.stream(
                     messages=messages,
                     model=request.model,
                     user=request.user,
                     context=conversation,
                     explicit_account_id=x_codearts_account,
+                    options=options,
                 ):
-                    yield _chunk(completion_id, request.model, delta, None)
+                    delta = upstream_chunk.get("delta") if isinstance(upstream_chunk, dict) else {}
+                    finish_reason = upstream_chunk.get("finish_reason") if isinstance(upstream_chunk, dict) else None
+                    if finish_reason is not None:
+                        finish_seen = True
+                    yield _chunk(completion_id, request.model, delta if isinstance(delta, dict) else {}, finish_reason)
                 completed = True
                 error_category = ""
-                yield _chunk(completion_id, request.model, None, "stop")
+                if not finish_seen:
+                    finish_reason = str((gateway.last_trace or {}).get("finish_reason") or "stop")
+                    yield _chunk(completion_id, request.model, {}, finish_reason)
+                if include_usage:
+                    trace = gateway.last_trace or {}
+                    usage_details = trace.get("usage_details") if isinstance(trace.get("usage_details"), dict) else trace.get("usage")
+                    yield _usage_chunk(completion_id, request.model, usage_details if isinstance(usage_details, dict) else {})
                 yield "data: [DONE]\n\n"
             except Exception as exc:
                 error_category = exc.category if isinstance(exc, CodeArtsUpstreamError) else "upstream_error"
@@ -505,6 +543,7 @@ async def chat_completions(
             user=request.user,
             context=conversation,
             explicit_account_id=x_codearts_account,
+            options=options,
         )
     except CodeArtsUpstreamError as exc:
         status_code = 503 if exc.category in {"no_account", "retry_budget"} else 502
@@ -545,6 +584,11 @@ async def chat_completions(
     )
     response.headers["X-CodeArts-Conversation"] = result.conversation_id
     response.headers["X-Request-ID"] = request_id
+    assistant_message: dict = {"role": "assistant", "content": result.text if result.text else None}
+    if result.reasoning_content:
+        assistant_message["reasoning_content"] = result.reasoning_content
+    if result.tool_calls:
+        assistant_message["tool_calls"] = result.tool_calls
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -553,11 +597,11 @@ async def chat_completions(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": result.text},
-                "finish_reason": "stop",
+                "message": assistant_message,
+                "finish_reason": result.finish_reason or "stop",
             }
         ],
-        "usage": result.usage,
+        "usage": result.usage_details or result.usage,
         "conversation_id": result.conversation_id,
         "codearts_account": result.account_id,
         "codearts_environment": result.environment,

@@ -8,7 +8,7 @@ from app.codearts.signer import sign_request
 def test_signer_builds_huawei_sdk_hmac_headers() -> None:
     signed = sign_request(
         method="POST",
-        url="https://example.com/v1/chat/chat?z=2&a=hello world",
+        url="https://example.com/api/v2/chat/completions?z=2&a=hello world",
         headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
         data={"hello": "世界"},
         access_key_id="test-ak",
@@ -21,14 +21,14 @@ def test_signer_builds_huawei_sdk_hmac_headers() -> None:
     assert signed.headers["host"] == "example.com"
     assert signed.headers["X-Security-Token"] == "test-token"
     assert signed.headers["Authorization"].startswith("SDK-HMAC-SHA256 Access=test-ak, SignedHeaders=")
-    assert "POST\n/v1/chat/chat/\na=hello%20world&z=2\n" in signed.canonical_request
+    assert "POST\n/api/v2/chat/completions/\na=hello%20world&z=2\n" in signed.canonical_request
     assert signed.body == '{"hello":"世界"}'.encode("utf-8")
 
 
 def test_signer_is_deterministic() -> None:
     kwargs = dict(
         method="POST",
-        url="https://example.com/v1/chat/chat",
+        url="https://example.com/api/v2/chat/completions",
         headers={"Content-Type": "application/json"},
         data={"messages": [{"role": "user", "content": "hi"}]},
         access_key_id="ak",

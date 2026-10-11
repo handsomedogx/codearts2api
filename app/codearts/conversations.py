@@ -94,7 +94,6 @@ class ConversationStore:
         account_id: str,
         environment: str,
         chat_id: str,
-        response_message_id: str,
         messages: list[dict[str, Any]],
         assistant_text: str,
     ) -> dict[str, Any]:
@@ -106,7 +105,6 @@ class ConversationStore:
                 "account_id": account_id,
                 "environment": environment,
                 "chat_id": chat_id,
-                "parent_message_id": response_message_id,
                 "history_hash": self.messages_hash(history),
                 "turns": int(updated.get("turns") or 0) + 1,
                 "updated_at": self._now_iso(),

@@ -14,7 +14,9 @@ A local OpenAI-compatible gateway for Huawei CodeArts Agent APIs. It uses the us
 - live `GET /v1/models` discovery from CodeArts builtin and third-party model APIs
 - `POST /v1/chat/completions`
 - streaming and non-streaming OpenAI-style responses
-- native multi-turn continuity using CodeArts `chat_id` + `parent_message_id`
+- role-preserving CodeArts v2 inference through `/api/v2/chat/completions`
+- OpenAI `system` / `user` / `assistant` / `tool` messages, tools, reasoning, and usage passthrough
+- multi-turn cache affinity using a stable CodeArts `chat_id` while always sending full OpenAI history
 - Huawei `SDK-HMAC-SHA256` request signing
 - CodeArts OAuth Authorization Code + PKCE + ES256 DPoP login
 - rotating refresh-token renewal and lazy refresh before expiry
@@ -45,7 +47,7 @@ Typical local client configuration:
 ```text
 Base URL  http://127.0.0.1:8000/v1
 API Key   sk-ca-...
-Model     GLM-5.2 (or codearts-auto)
+Model     GLM-5.2
 ```
 
 Python example:
@@ -116,11 +118,21 @@ GET /v1/model/builtin
 GET /api/v1/third-party/model/list?page_num=1&page_size=50
 ```
 
-Results are cached for a short TTL. `GET /v1/models?refresh=true` forces a refresh. If model discovery is temporarily unavailable, the configured fallback model list remains available so OpenAI-compatible clients can still use `codearts-auto`.
+Results are cached for a short TTL. `GET /v1/models?refresh=true` forces a refresh. If model discovery is temporarily unavailable, the configured fallback model list remains available; the default fallback is `GLM-5.2`.
+
+## Upstream inference protocol
+
+Chat inference uses only the CodeArts v2 OpenAI-shaped endpoint:
+
+```text
+POST /api/v2/chat/completions
+```
+
+`codearts2api` keeps the incoming OpenAI message roles intact instead of converting them to the legacy `task=chat` content-block format. `system` prompts therefore remain real `system` messages, and supported OpenAI fields such as `tools`, `tool_choice`, `temperature`, `top_p`, `max_tokens`, `reasoning_effort`, `stop`, penalties, and `response_format` are passed through to CodeArts v2. Streaming responses preserve `content`, `reasoning_content`, `tool_calls`, `finish_reason`, and real upstream usage. The old `/v1/chat/chat` ChatAgent path is not used as a fallback.
 
 ## Multi-turn conversations
 
-CodeArts chat history is continued with its native `chat_id` and `parent_message_id` chain. `codearts2api` stores only routing metadata plus SHA-256 hashes under `data/conversations/`; prompt and response text are not persisted there.
+Every v2 request sends the full OpenAI message history upstream. A stable CodeArts `chat_id` is reused when the same conversation stays on the same account, which preserves prompt-cache affinity without relying on the legacy `parent_message_id` continuation chain. `codearts2api` stores only routing metadata plus SHA-256 hashes under `data/conversations/`; prompt and response text are not persisted there.
 
 You can explicitly reuse a conversation in either of these ways:
 
@@ -134,7 +146,7 @@ or add the compatible extension field:
 {"conversation_id":"<conversation-id>"}
 ```
 
-The response includes the same `conversation_id` and also returns it in the `X-CodeArts-Conversation` header. Standard OpenAI clients that resend full message history can work without this extension: the gateway hashes the known history and automatically matches it to the existing CodeArts conversation, then sends only the newest user turn upstream.
+The response includes the same `conversation_id` and also returns it in the `X-CodeArts-Conversation` header. Standard OpenAI clients that resend full message history can work without this extension: the gateway hashes the known history and automatically matches it to the existing CodeArts conversation while still forwarding the complete role-preserving message list upstream.
 
 ## China and International profiles
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import random
 import time
 import uuid
@@ -22,6 +23,10 @@ class CompletionResult:
     environment: str
     attempts: int
     usage: dict[str, int]
+    usage_details: dict[str, Any]
+    reasoning_content: str = ""
+    tool_calls: list[dict[str, Any]] | None = None
+    finish_reason: str = "stop"
 
 
 class RetryBudget:
@@ -98,6 +103,17 @@ class CodeArtsGateway:
         total = max(0, int(raw.get("total_tokens") or 0)) or prompt + completion
         return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
+    @staticmethod
+    def _usage_details(client: Any) -> dict[str, Any]:
+        factory = getattr(client, "usage_payload", None)
+        if callable(factory):
+            raw = factory()
+        else:
+            raw = getattr(client, "last_usage_details", None)
+        details = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+        details.update(CodeArtsGateway._usage(client))
+        return details
+
     def _can_retry_same_account(self, exc: CodeArtsUpstreamError, retry_index: int) -> bool:
         return (
             exc.retryable
@@ -128,15 +144,10 @@ class CodeArtsGateway:
         return budget.available()
 
     @staticmethod
-    def _session_params(context: dict[str, Any], account_id: str) -> tuple[str, str | None, bool]:
-        same_account = bool(context.get("account_id") == account_id and context.get("chat_id"))
-        if same_account:
-            return (
-                str(context["chat_id"]),
-                str(context.get("parent_message_id") or "") or None,
-                int(context.get("turns") or 0) > 0,
-            )
-        return uuid.uuid4().hex, None, False
+    def _session_chat_id(context: dict[str, Any], account_id: str) -> str:
+        if context.get("account_id") == account_id and context.get("chat_id"):
+            return str(context["chat_id"])
+        return uuid.uuid4().hex
 
     async def _candidates(
         self,
@@ -169,7 +180,6 @@ class CodeArtsGateway:
             account_id=str(account["id"]),
             environment=str(account["environment"]),
             chat_id=client.last_chat_id or chat_id,
-            response_message_id=client.last_response_message_id,
             messages=messages,
             assistant_text=assistant_text,
         )
@@ -184,9 +194,11 @@ class CodeArtsGateway:
             "environment": "",
             "attempts": 0,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage_details": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "error_category": "",
             "status_code": None,
             "model": model,
+            "finish_reason": "stop",
         }
 
     async def complete(
@@ -197,6 +209,7 @@ class CodeArtsGateway:
         user: str | None,
         context: dict[str, Any],
         explicit_account_id: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> CompletionResult:
         self._reset_trace(model)
         candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context, model=model)
@@ -212,7 +225,7 @@ class CodeArtsGateway:
         retry_ordinal = 0
         for account, credentials in candidates:
             account_id = str(account["id"])
-            chat_id, parent_message_id, native_continuation = self._session_params(context, account_id)
+            chat_id = self._session_chat_id(context, account_id)
             retry_index = 0
             while budget.available():
                 request_started_at = self.auth.pool.try_begin_request(account_id)
@@ -242,8 +255,7 @@ class CodeArtsGateway:
                         model=model,
                         user=user,
                         chat_id=chat_id,
-                        parent_message_id=parent_message_id,
-                        native_continuation=native_continuation,
+                        options=options,
                     )
                     attempt_success = True
                 except CodeArtsUpstreamError as exc:
@@ -268,7 +280,7 @@ class CodeArtsGateway:
                     )
 
                 if attempt_success:
-                    self.last_trace.update({"success": True, "usage": self._usage(client), "error_category": "", "status_code": 200})
+                    self.last_trace.update({"success": True, "usage": self._usage(client), "usage_details": self._usage_details(client), "error_category": "", "status_code": 200, "finish_reason": getattr(client, "last_finish_reason", "stop") or "stop"})
                     self._mark_success(account_id, model)
                     self._complete_context(
                         context,
@@ -285,6 +297,10 @@ class CodeArtsGateway:
                         environment=str(account["environment"]),
                         attempts=budget.used,
                         usage=self._usage(client),
+                        usage_details=self._usage_details(client),
+                        reasoning_content=getattr(client, "last_reasoning_content", "") or "",
+                        tool_calls=getattr(client, "last_tool_calls", None) or None,
+                        finish_reason=getattr(client, "last_finish_reason", "stop") or "stop",
                     )
 
                 if retry_same and last_error is not None:
@@ -311,7 +327,8 @@ class CodeArtsGateway:
         user: str | None,
         context: dict[str, Any],
         explicit_account_id: str | None = None,
-    ) -> AsyncIterator[str]:
+        options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         self._reset_trace(model)
         candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context, model=model)
         if not candidates:
@@ -326,7 +343,7 @@ class CodeArtsGateway:
         retry_ordinal = 0
         for account, credentials in candidates:
             account_id = str(account["id"])
-            chat_id, parent_message_id, native_continuation = self._session_params(context, account_id)
+            chat_id = self._session_chat_id(context, account_id)
             retry_index = 0
             while budget.available():
                 request_started_at = self.auth.pool.try_begin_request(account_id)
@@ -353,17 +370,19 @@ class CodeArtsGateway:
                 error_category = ""
                 retry_same = False
                 try:
-                    async for delta in client.chat_stream(
+                    async for chunk in client.chat_stream(
                         messages=messages,
                         model=model,
                         user=user,
                         chat_id=chat_id,
-                        parent_message_id=parent_message_id,
-                        native_continuation=native_continuation,
+                        options=options,
                     ):
                         emitted = True
-                        collected.append(delta)
-                        yield delta
+                        delta = chunk.get("delta") if isinstance(chunk, dict) else {"content": str(chunk)}
+                        content = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(content, str):
+                            collected.append(content)
+                        yield chunk if isinstance(chunk, dict) else {"delta": delta, "finish_reason": None}
                     attempt_success = True
                 except CodeArtsUpstreamError as exc:
                     last_error = exc
@@ -390,7 +409,7 @@ class CodeArtsGateway:
                     )
 
                 if attempt_success:
-                    self.last_trace.update({"success": True, "usage": self._usage(client), "error_category": "", "status_code": 200})
+                    self.last_trace.update({"success": True, "usage": self._usage(client), "usage_details": self._usage_details(client), "error_category": "", "status_code": 200, "finish_reason": getattr(client, "last_finish_reason", "stop") or "stop"})
                     self._mark_success(account_id, model)
                     self._complete_context(
                         context,

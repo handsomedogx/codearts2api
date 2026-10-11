@@ -229,21 +229,6 @@ class ModelCatalog:
                     }
                     for model in dict.fromkeys((self.settings.default_model, *self.settings.models))
                 ]
-            if self.settings.default_model == "codearts-auto" and "codearts-auto" not in merged:
-                ordered.insert(
-                    0,
-                    {
-                        "id": "codearts-auto",
-                        "display_name": "CodeArts Auto",
-                        "owned_by": "codearts",
-                        "sources": ["virtual"],
-                        "environments": sorted({env for item in ordered for env in item["environments"]}),
-                        "context_window": max((int(item.get("context_window") or 0) for item in ordered), default=0) or None,
-                        "input_length": max((int(item.get("input_length") or 0) for item in ordered), default=0) or None,
-                        "max_tokens": max((int(item.get("max_tokens") or 0) for item in ordered), default=0) or None,
-                        "thinking_type": None,
-                    },
-                )
             return ordered
 
 

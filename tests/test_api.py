@@ -36,7 +36,7 @@ def test_health_and_models_exist(tmp_path) -> None:
         models = client.get("/v1/models", headers=_api_auth(client))
         assert models.status_code == 200
         assert models.json()["object"] == "list"
-        assert models.json()["data"][0]["id"] == "codearts-auto"
+        assert models.json()["data"][0]["id"] == "GLM-5.2"
     finally:
         app.dependency_overrides.clear()
 
@@ -96,9 +96,24 @@ def _credentialed_settings(tmp_path) -> Settings:
 
 def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
     async def fake_chat(self, *, messages, model, user=None, **kwargs):
-        assert messages == [{"role": "user", "content": "hello"}]
-        assert model == "codearts-auto"
+        assert messages == [
+            {"role": "system", "content": "Your name is Little Code Sauce"},
+            {"role": "user", "content": "hello"},
+        ]
+        assert model == "GLM-5.2"
+        assert kwargs["options"]["temperature"] == 0.2
+        assert kwargs["options"]["tools"][0]["function"]["name"] == "ping"
         self.last_usage = {"prompt_tokens": 97, "completion_tokens": 2, "total_tokens": 99}
+        self.last_usage_details = {
+            "prompt_tokens": 97,
+            "completion_tokens": 2,
+            "total_tokens": 99,
+            "prompt_tokens_details": {"cached_tokens": 7},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        }
+        self.last_reasoning_content = "brief reasoning"
+        self.last_tool_calls = [{"id": "call-1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}]
+        self.last_finish_reason = "tool_calls"
         return "Hello from CodeArts"
 
     monkeypatch.setattr(CodeArtsClient, "chat", fake_chat)
@@ -108,19 +123,33 @@ def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
         response = client.post(
             "/v1/chat/completions",
             headers={**_api_auth(client), "X-Forwarded-For": "198.51.100.9, 10.0.0.1", "User-Agent": "deepseek-harness/test"},
-            json={"model": "codearts-auto", "messages": [{"role": "user", "content": "hello"}]},
+            json={
+                "model": "GLM-5.2",
+                "temperature": 0.2,
+                "tools": [{"type": "function", "function": {"name": "ping", "parameters": {"type": "object"}}}],
+                "messages": [
+                    {"role": "system", "content": "Your name is Little Code Sauce"},
+                    {"role": "user", "content": "hello"},
+                ],
+            },
         )
         assert response.status_code == 200
         body = response.json()
         assert body["object"] == "chat.completion"
         assert body["choices"][0]["message"]["content"] == "Hello from CodeArts"
-        assert body["choices"][0]["finish_reason"] == "stop"
-        assert body["usage"] == {"prompt_tokens": 97, "completion_tokens": 2, "total_tokens": 99}
+        assert body["choices"][0]["finish_reason"] == "tool_calls"
+        assert body["choices"][0]["message"]["reasoning_content"] == "brief reasoning"
+        assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "ping"
+        assert body["usage"]["prompt_tokens"] == 97
+        assert body["usage"]["completion_tokens"] == 2
+        assert body["usage"]["total_tokens"] == 99
+        assert body["usage"]["prompt_tokens_details"]["cached_tokens"] == 7
+        assert body["usage"]["completion_tokens_details"]["reasoning_tokens"] == 1
         logs = client.get("/api/ui/logs?time_range=all").json()["items"]
         assert len(logs) == 1
         item = logs[0]
         assert item["success"] is True
-        assert item["model"] == "codearts-auto"
+        assert item["model"] == "GLM-5.2"
         assert item["source_ip"] == "198.51.100.9"
         assert item["user_agent"] == "deepseek-harness/test"
         assert item["total_tokens"] == 99
@@ -132,8 +161,19 @@ def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
 
 def test_streaming_openai_translation(monkeypatch, tmp_path) -> None:
     async def fake_chat_stream(self, *, messages, model, user=None, **kwargs):
-        yield "Hel"
-        yield "lo"
+        self.last_usage = {"prompt_tokens": 97, "completion_tokens": 12, "total_tokens": 109}
+        self.last_usage_details = {
+            "prompt_tokens": 97,
+            "completion_tokens": 12,
+            "total_tokens": 109,
+            "prompt_tokens_details": {"cached_tokens": 17},
+            "completion_tokens_details": {"reasoning_tokens": 4},
+        }
+        yield {"delta": {"reasoning_content": "think"}, "finish_reason": None}
+        yield {"delta": {"content": "Hel"}, "finish_reason": None}
+        yield {"delta": {"content": "lo", "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}]}, "finish_reason": None}
+        self.last_finish_reason = "tool_calls"
+        yield {"delta": {}, "finish_reason": "tool_calls"}
 
     monkeypatch.setattr(CodeArtsClient, "chat_stream", fake_chat_stream)
     app.dependency_overrides[get_settings] = lambda: _credentialed_settings(tmp_path)
@@ -143,19 +183,66 @@ def test_streaming_openai_translation(monkeypatch, tmp_path) -> None:
             "POST",
             "/v1/chat/completions",
             headers=_api_auth(client),
-            json={"model": "codearts-auto", "stream": True, "messages": [{"role": "user", "content": "hello"}]},
+            json={
+                "model": "GLM-5.2",
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "messages": [{"role": "user", "content": "hello"}],
+            },
         ) as response:
             text = "".join(response.iter_text())
         assert response.status_code == 200
         assert '"content":"Hel"' in text
         assert '"content":"lo"' in text
-        assert '"finish_reason":"stop"' in text
+        assert '"reasoning_content":"think"' in text
+        assert '"tool_calls"' in text
+        assert '"finish_reason":"tool_calls"' in text
+        events = [
+            __import__("json").loads(line[6:])
+            for line in text.splitlines()
+            if line.startswith("data: {")
+        ]
+        usage_chunks = [event for event in events if "usage" in event]
+        assert len(usage_chunks) == 1
+        assert usage_chunks[0]["choices"] == []
+        assert usage_chunks[0]["usage"]["prompt_tokens"] == 97
+        assert usage_chunks[0]["usage"]["completion_tokens"] == 12
+        assert usage_chunks[0]["usage"]["total_tokens"] == 109
+        assert usage_chunks[0]["usage"]["prompt_tokens_details"]["cached_tokens"] == 17
+        assert usage_chunks[0]["usage"]["completion_tokens_details"]["reasoning_tokens"] == 4
+        assert text.index('"choices":[],"usage"') < text.index("data: [DONE]")
         assert "data: [DONE]" in text
         logs = client.get("/api/ui/logs?time_range=all").json()["items"]
         assert len(logs) == 1
         assert logs[0]["stream"] is True
         assert logs[0]["success"] is True
         assert logs[0]["attempts"] == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_streaming_usage_is_omitted_without_include_usage(monkeypatch, tmp_path) -> None:
+    async def fake_chat_stream(self, *, messages, model, user=None, **kwargs):
+        self.last_usage = {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        self.last_usage_details = dict(self.last_usage)
+        yield {"delta": {"content": "ok"}, "finish_reason": None}
+        self.last_finish_reason = "stop"
+        yield {"delta": {}, "finish_reason": "stop"}
+
+    monkeypatch.setattr(CodeArtsClient, "chat_stream", fake_chat_stream)
+    app.dependency_overrides[get_settings] = lambda: _credentialed_settings(tmp_path)
+    try:
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers=_api_auth(client),
+            json={"model": "GLM-5.2", "stream": True, "messages": [{"role": "user", "content": "hello"}]},
+        ) as response:
+            text = "".join(response.iter_text())
+        assert response.status_code == 200
+        assert '"usage"' not in text
+        assert "data: [DONE]" in text
     finally:
         app.dependency_overrides.clear()
 
@@ -202,7 +289,7 @@ def test_web_ui_and_ui_meta_exist() -> None:
     assert meta.status_code == 200
     body = meta.json()
     assert body["name"] == "codearts2api"
-    assert body["version"] == "0.8.0"
+    assert body["version"] == "0.9.0"
     assert body["api_base"] == "/v1"
     assert "api_key_enabled" in body
 

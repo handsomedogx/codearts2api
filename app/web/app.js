@@ -425,7 +425,7 @@ function renderModels(items) {
     info.append(symbol, copy);
     const badge = document.createElement("span");
     badge.className = "pill neutral";
-    badge.textContent = model.id === "codearts-auto" ? tr("Default") : tr("Model");
+    badge.textContent = model.id === "GLM-5.2" ? tr("Default") : tr("Model");
     row.append(info, badge);
     list.appendChild(row);
 
@@ -991,7 +991,7 @@ async function sendPlayground() {
     const response = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: { ...authHeaders(true) },
-      body: JSON.stringify({ model: $("modelSelect").value || "codearts-auto", messages, stream: true }),
+      body: JSON.stringify({ model: $("modelSelect").value || "GLM-5.2", messages, stream: true }),
     });
     if (!response.ok) {
       let detail = `${response.status} ${response.statusText}`;
