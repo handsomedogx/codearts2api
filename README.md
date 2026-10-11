@@ -18,7 +18,7 @@ A local OpenAI-compatible gateway for Huawei CodeArts Agent APIs. It uses the us
 - Huawei `SDK-HMAC-SHA256` request signing
 - CodeArts OAuth Authorization Code + PKCE + ES256 DPoP login
 - rotating refresh-token renewal and lazy refresh before expiry
-- sanitized request logs and bilingual Web UI
+- persistent sanitized request logs with search/filter/summary and bilingual Web UI
 - optional manual temporary-credential fallback
 
 ## Install and run
@@ -155,6 +155,14 @@ POST   /api/ui/routing
 ```
 
 Account APIs deliberately exclude AK, SK, Security Token, refresh token, PKCE verifier, and private DPoP keys.
+
+## Request logs
+
+Completed `/v1/chat/completions` calls are appended to `data/request_logs.jsonl`. The log is deliberately metadata-only: it stores request ID, result, selected model/account, source IP, User-Agent, latency, real upstream token usage, attempts, conversation ID and an error category. Prompt text, assistant output, Authorization headers, AK/SK, Security Token, refresh tokens and DPoP keys are never written.
+
+The Logs page supports free-text search across IP / UA / model / account / request ID, success/failure filtering, time ranges, row limits, archive size, success rate, HTTP success rate, average latency and current process-local in-progress requests. For proxied deployments the source IP uses the first `X-Forwarded-For` value; without that header it falls back to the TCP peer address.
+
+The JSONL path can be changed with `CODEARTS_REQUEST_LOGS_FILE`.
 
 ## Credential refresh
 

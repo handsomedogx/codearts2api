@@ -5,8 +5,6 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from collections import deque
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -19,14 +17,14 @@ from app.codearts.errors import CodeArtsUpstreamError
 from app.codearts.gateway import CodeArtsGateway
 from app.codearts.keepalive import KeepaliveService
 from app.codearts.model_catalog import get_model_catalog
+from app.codearts.request_logs import get_request_log_store
 from app.codearts.subscription import get_subscription_catalog
 from app.codearts.usage import get_usage_store
 from app.config import Settings, get_settings, normalize_environment
 from app.models import ChatCompletionRequest
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 WEB_DIR = Path(__file__).resolve().parent / "web"
-REQUEST_LOGS: deque[dict] = deque(maxlen=200)
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI):
@@ -57,6 +55,24 @@ def get_request_auth_manager(settings: Settings = Depends(get_settings)) -> Auth
     if settings == get_settings():
         return get_auth_manager()
     return AuthManager(settings)
+
+
+def _source_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first[:128]
+    return (request.client.host if request.client else "")[:128]
+
+
+def _account_log_name(auth: AuthManager, account_id: str) -> str:
+    if not account_id or account_id.startswith("manual-"):
+        return ""
+    record = auth.pool.get(account_id)
+    if not record:
+        return ""
+    return str(record.get("user_name") or record.get("user_id") or "")[:160]
 
 
 def _messages(request: ChatCompletionRequest) -> list[dict]:
@@ -145,25 +161,12 @@ def _oauth_result_page(
 
 
 @app.middleware("http")
-async def request_activity_log(request: Request, call_next):
-    started = time.perf_counter()
-    status_code = 500
-    try:
-        response = await call_next(request)
-        status_code = response.status_code
-        return response
-    finally:
-        path = request.url.path
-        if path.startswith("/v1/") or path.startswith("/auth/") or path == "/health":
-            REQUEST_LOGS.appendleft(
-                {
-                    "time": datetime.now(timezone.utc).isoformat(),
-                    "method": request.method,
-                    "path": path,
-                    "status": status_code,
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-                }
-            )
+async def request_context(request: Request, call_next):
+    request_id = f"req-{uuid.uuid4().hex[:16]}"
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-ID", request_id)
+    return response
 
 
 @app.get("/", include_in_schema=False)
@@ -230,8 +233,14 @@ async def ui_routing_update(payload: dict = Body(...), auth: AuthManager = Depen
 
 
 @app.get("/api/ui/logs", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
-async def ui_logs(limit: int = Query(default=50, ge=1, le=200)) -> dict:
-    return {"items": list(REQUEST_LOGS)[:limit]}
+async def ui_logs(
+    q: str = Query(default="", max_length=200),
+    result: str = Query(default="all"),
+    time_range: str = Query(default="24h"),
+    limit: int = Query(default=100, ge=1, le=500),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    return get_request_log_store(settings).query(q=q, result=result, time_range=time_range, limit=limit)
 
 
 @app.get("/api/ui/usage", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
@@ -356,6 +365,7 @@ def _chunk(completion_id: str, model: str, content: str | None = None, finish_re
 @app.post("/v1/chat/completions", dependencies=[Depends(require_local_api_key)])
 async def chat_completions(
     request: ChatCompletionRequest,
+    raw_request: Request,
     response: Response,
     settings: Settings = Depends(get_settings),
     auth: AuthManager = Depends(get_request_auth_manager),
@@ -363,17 +373,57 @@ async def chat_completions(
     x_codearts_conversation: str | None = Header(default=None, alias="X-CodeArts-Conversation"),
 ):
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    request_id = str(getattr(raw_request.state, "request_id", "") or f"req-{uuid.uuid4().hex[:16]}")
+    log_store = get_request_log_store(settings)
+    log_started = log_store.begin()
+    source_ip = _source_ip(raw_request)
+    user_agent = raw_request.headers.get("user-agent", "")
     messages = _messages(request)
     gateway = CodeArtsGateway(settings, auth)
     requested_conversation_id = x_codearts_conversation or request.conversation_id
+
+    def finish_log(
+        *,
+        status: int,
+        success: bool,
+        account_id: str = "",
+        environment: str = "",
+        attempts: int = 0,
+        usage: dict | None = None,
+        conversation_id: str = "",
+        error_category: str = "",
+    ) -> None:
+        log_store.finish(
+            log_started,
+            {
+                "request_id": request_id,
+                "status": status,
+                "success": success,
+                "stream": bool(request.stream),
+                "model": request.model,
+                "account_id": account_id,
+                "account_name": _account_log_name(auth, account_id),
+                "environment": environment,
+                "source_ip": source_ip,
+                "user_agent": user_agent,
+                "usage": usage or {},
+                "attempts": attempts,
+                "conversation_id": conversation_id,
+                "error_category": error_category,
+            },
+        )
+
     try:
         conversation = gateway.resolve_conversation(messages, requested_conversation_id)
     except ValueError as exc:
+        finish_log(status=400, success=False, error_category="invalid_request")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     conversation_id = str(conversation["id"])
 
     if request.stream:
         async def event_stream() -> AsyncIterator[str]:
+            completed = False
+            error_category = "stream_interrupted"
             yield _chunk(completion_id, request.model, None, None)
             try:
                 async for delta in gateway.stream(
@@ -384,17 +434,32 @@ async def chat_completions(
                     explicit_account_id=x_codearts_account,
                 ):
                     yield _chunk(completion_id, request.model, delta, None)
+                completed = True
+                error_category = ""
                 yield _chunk(completion_id, request.model, None, "stop")
                 yield "data: [DONE]\n\n"
             except Exception as exc:
+                error_category = exc.category if isinstance(exc, CodeArtsUpstreamError) else "upstream_error"
                 error = {"error": {"message": str(exc), "type": "upstream_error"}}
                 yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
+            finally:
+                trace = gateway.last_trace or {}
+                finish_log(
+                    status=200,
+                    success=completed,
+                    account_id=str(trace.get("account_id") or ""),
+                    environment=str(trace.get("environment") or ""),
+                    attempts=int(trace.get("attempts") or 0),
+                    usage=trace.get("usage") if isinstance(trace.get("usage"), dict) else {},
+                    conversation_id=conversation_id,
+                    error_category=error_category or str(trace.get("error_category") or ""),
+                )
 
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={"X-CodeArts-Conversation": conversation_id},
+            headers={"X-CodeArts-Conversation": conversation_id, "X-Request-ID": request_id},
         )
 
     try:
@@ -406,12 +471,44 @@ async def chat_completions(
             explicit_account_id=x_codearts_account,
         )
     except CodeArtsUpstreamError as exc:
-        status_code = 503 if exc.category == "no_account" else 502
+        status_code = 503 if exc.category in {"no_account", "retry_budget"} else 502
+        trace = gateway.last_trace or {}
+        finish_log(
+            status=status_code,
+            success=False,
+            account_id=str(trace.get("account_id") or ""),
+            environment=str(trace.get("environment") or ""),
+            attempts=int(trace.get("attempts") or 0),
+            usage=trace.get("usage") if isinstance(trace.get("usage"), dict) else {},
+            conversation_id=conversation_id,
+            error_category=exc.category,
+        )
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     except Exception as exc:
+        trace = gateway.last_trace or {}
+        finish_log(
+            status=502,
+            success=False,
+            account_id=str(trace.get("account_id") or ""),
+            environment=str(trace.get("environment") or ""),
+            attempts=int(trace.get("attempts") or 0),
+            usage=trace.get("usage") if isinstance(trace.get("usage"), dict) else {},
+            conversation_id=conversation_id,
+            error_category="upstream_error",
+        )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    finish_log(
+        status=200,
+        success=True,
+        account_id=result.account_id,
+        environment=result.environment,
+        attempts=result.attempts,
+        usage=result.usage,
+        conversation_id=result.conversation_id,
+    )
     response.headers["X-CodeArts-Conversation"] = result.conversation_id
+    response.headers["X-Request-ID"] = request_id
     return {
         "id": completion_id,
         "object": "chat.completion",

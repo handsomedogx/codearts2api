@@ -7,6 +7,7 @@ const state = {
   routing: { strategy: "round_robin" },
   models: [],
   logs: [],
+  logsPayload: null,
   usage: null,
   usageDays: 3,
   responseText: "",
@@ -558,14 +559,45 @@ async function loadUsage(forceQuota = false) {
   }
 }
 
-function renderLogs(items) {
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+}
+
+function formatLogDuration(ms) {
+  const value = Number(ms || 0);
+  return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)} s` : `${Math.round(value)} ms`;
+}
+
+function renderLogSummary(payload) {
+  const summary = payload?.summary || {};
+  const zh = window.codeartsI18n.getLanguage() === "zh-CN";
+  if (!summary.completed) {
+    $("logsSummaryText").textContent = zh ? `已完成 0 · 进行中 ${summary.in_progress || 0}` : `Completed 0 · In progress ${summary.in_progress || 0}`;
+  } else {
+    const success = Number(summary.success_rate || 0).toFixed(1);
+    const http = Number(summary.http_success_rate || 0).toFixed(1);
+    const latency = formatLogDuration(summary.avg_latency_ms || 0);
+    $("logsSummaryText").textContent = zh
+      ? `已完成 ${formatCount(summary.completed)} · 成功 ${success}% · HTTP ${http}% · 平均 ${latency} · 进行中 ${summary.in_progress || 0}`
+      : `Completed ${formatCount(summary.completed)} · Success ${success}% · HTTP ${http}% · Avg ${latency} · In progress ${summary.in_progress || 0}`;
+  }
+  $("logsArchiveText").textContent = `${tr("Archive")} ${formatBytes(payload?.archive_size_bytes || 0)}`;
+}
+
+function renderLogs(items, payload = state.logsPayload) {
   state.logs = items;
+  state.logsPayload = payload || state.logsPayload;
+  renderLogSummary(state.logsPayload || {});
   const body = $("logsBody");
   body.replaceChildren();
   if (!items.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = 10;
     cell.className = "empty-cell";
     cell.textContent = tr("No requests yet.");
     row.appendChild(cell);
@@ -574,33 +606,81 @@ function renderLogs(items) {
   }
   items.forEach((item) => {
     const row = document.createElement("tr");
-    const time = document.createElement("td");
-    time.textContent = new Date(item.time).toLocaleTimeString(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US");
-    const method = document.createElement("td");
-    const methodSpan = document.createElement("span");
-    methodSpan.className = "log-method";
-    methodSpan.textContent = item.method;
-    method.appendChild(methodSpan);
-    const path = document.createElement("td");
-    const code = document.createElement("code");
-    code.textContent = item.path;
-    path.appendChild(code);
-    const status = document.createElement("td");
-    const badge = document.createElement("span");
-    badge.className = `status-code ${item.status < 400 ? "ok" : "bad"}`;
-    badge.textContent = String(item.status);
-    status.appendChild(badge);
-    const duration = document.createElement("td");
-    duration.textContent = `${item.duration_ms} ms`;
-    row.append(time, method, path, status, duration);
+    row.className = "request-log-row";
+
+    const timeCell = document.createElement("td");
+    timeCell.className = "log-time-cell";
+    const date = new Date(item.time);
+    timeCell.textContent = date.toLocaleTimeString(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US", {hour12:false});
+    timeCell.title = date.toLocaleString(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US");
+
+    const resultCell = document.createElement("td");
+    const resultBadge = document.createElement("span");
+    resultBadge.className = `request-result ${item.success ? "ok" : "bad"}`;
+    resultBadge.textContent = `${item.status || 0} ${item.success ? tr("Success") : tr("Failed")}`;
+    if (!item.success && item.error_category) resultBadge.title = item.error_category;
+    resultCell.appendChild(resultBadge);
+
+    const modelCell = document.createElement("td");
+    modelCell.className = "log-model-cell";
+    modelCell.textContent = item.model || "—";
+    modelCell.title = item.model || "";
+
+    const accountCell = document.createElement("td");
+    accountCell.className = "log-account-cell";
+    const accountMain = document.createElement("span");
+    accountMain.textContent = item.account_name || (item.account_id ? shortId(item.account_id) : "—");
+    accountCell.appendChild(accountMain);
+    if (item.account_name && item.account_id) {
+      const accountId = document.createElement("small");
+      accountId.textContent = shortId(item.account_id);
+      accountId.title = item.account_id;
+      accountCell.appendChild(accountId);
+    }
+
+    const ipCell = document.createElement("td");
+    ipCell.className = "log-ip-cell";
+    ipCell.textContent = item.source_ip || "—";
+
+    const uaCell = document.createElement("td");
+    uaCell.className = "log-ua-cell";
+    uaCell.textContent = item.user_agent || "—";
+    uaCell.title = item.user_agent || "";
+
+    const durationCell = document.createElement("td");
+    durationCell.className = "log-number-cell";
+    durationCell.textContent = formatLogDuration(item.duration_ms);
+
+    const tokenCell = document.createElement("td");
+    tokenCell.className = "log-number-cell";
+    tokenCell.textContent = item.total_tokens > 0 ? formatTokenCount(item.total_tokens) : "—";
+    if (item.total_tokens > 0) tokenCell.title = `prompt ${formatTokenCount(item.prompt_tokens)} · completion ${formatTokenCount(item.completion_tokens)}`;
+
+    const attemptsCell = document.createElement("td");
+    attemptsCell.className = "log-number-cell";
+    attemptsCell.textContent = item.attempts || "—";
+
+    const requestCell = document.createElement("td");
+    requestCell.className = "log-request-id";
+    requestCell.textContent = item.request_id || "—";
+    requestCell.title = `${item.request_id || ""}${item.conversation_id ? `\nconversation ${item.conversation_id}` : ""}`;
+
+    row.append(timeCell, resultCell, modelCell, accountCell, ipCell, uaCell, durationCell, tokenCell, attemptsCell, requestCell);
     body.appendChild(row);
   });
 }
 
+let logsSearchTimer = null;
 async function loadLogs() {
   try {
-    const body = await apiFetch("/api/ui/logs?limit=100");
-    renderLogs(body.items || []);
+    const params = new URLSearchParams({
+      q: $("logsSearch")?.value || "",
+      result: $("logsResult")?.value || "all",
+      time_range: $("logsRange")?.value || "24h",
+      limit: $("logsLimit")?.value || "100",
+    });
+    const payload = await apiFetch(`/api/ui/logs?${params.toString()}`);
+    renderLogs(payload.items || [], payload);
   } catch (error) {
     if (!String(error.message).includes("401")) toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `获取日志失败：${error.message}` : `Logs failed: ${error.message}`), "error");
   }
@@ -947,6 +1027,13 @@ $("accountList").addEventListener("click", (event) => {
 $("routingStrategy").addEventListener("change", updateRouting);
 $("refreshAllBtn").addEventListener("click", loadAll);
 $("refreshLogsBtn").addEventListener("click", loadLogs);
+$("logsResult").addEventListener("change", loadLogs);
+$("logsRange").addEventListener("change", loadLogs);
+$("logsLimit").addEventListener("change", loadLogs);
+$("logsSearch").addEventListener("input", () => {
+  if (logsSearchTimer) clearTimeout(logsSearchTimer);
+  logsSearchTimer = setTimeout(loadLogs, 280);
+});
 $("refreshUsageBtn").addEventListener("click", () => loadUsage(true));
 $("usageRange").addEventListener("change", () => {
   state.usageDays = Number($("usageRange").value || 3);

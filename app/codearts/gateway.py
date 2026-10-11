@@ -49,6 +49,7 @@ class CodeArtsGateway:
         self.settings = settings
         self.auth = auth
         self.conversations = ConversationStore(settings)
+        self.last_trace: dict[str, Any] = {}
 
     def resolve_conversation(
         self,
@@ -176,6 +177,18 @@ class CodeArtsGateway:
     def _new_budget(self) -> RetryBudget:
         return RetryBudget(self.settings.retry_budget_attempts, self.settings.retry_budget_seconds)
 
+    def _reset_trace(self, model: str) -> None:
+        self.last_trace = {
+            "success": False,
+            "account_id": "",
+            "environment": "",
+            "attempts": 0,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "error_category": "",
+            "status_code": None,
+            "model": model,
+        }
+
     async def complete(
         self,
         *,
@@ -185,6 +198,7 @@ class CodeArtsGateway:
         context: dict[str, Any],
         explicit_account_id: str | None = None,
     ) -> CompletionResult:
+        self._reset_trace(model)
         candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context, model=model)
         if not candidates:
             raise CodeArtsUpstreamError(
@@ -207,6 +221,11 @@ class CodeArtsGateway:
                 if not budget.consume():
                     self.auth.pool.release_request(account_id)
                     break
+                self.last_trace.update({
+                    "account_id": account_id,
+                    "environment": str(account["environment"]),
+                    "attempts": budget.used,
+                })
                 client = CodeArtsClient(
                     self.settings,
                     auth_manager=self.auth,
@@ -230,6 +249,7 @@ class CodeArtsGateway:
                 except CodeArtsUpstreamError as exc:
                     last_error = exc
                     error_category = exc.category
+                    self.last_trace.update({"error_category": exc.category, "status_code": exc.status_code})
                     retry_same = self._can_retry_same_account(exc, retry_index) and budget.available()
                     if not retry_same:
                         self._mark_failure(account_id, model, exc)
@@ -248,6 +268,7 @@ class CodeArtsGateway:
                     )
 
                 if attempt_success:
+                    self.last_trace.update({"success": True, "usage": self._usage(client), "error_category": "", "status_code": 200})
                     self._mark_success(account_id, model)
                     self._complete_context(
                         context,
@@ -291,6 +312,7 @@ class CodeArtsGateway:
         context: dict[str, Any],
         explicit_account_id: str | None = None,
     ) -> AsyncIterator[str]:
+        self._reset_trace(model)
         candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context, model=model)
         if not candidates:
             raise CodeArtsUpstreamError(
@@ -313,6 +335,11 @@ class CodeArtsGateway:
                 if not budget.consume():
                     self.auth.pool.release_request(account_id)
                     break
+                self.last_trace.update({
+                    "account_id": account_id,
+                    "environment": str(account["environment"]),
+                    "attempts": budget.used,
+                })
                 client = CodeArtsClient(
                     self.settings,
                     auth_manager=self.auth,
@@ -341,6 +368,7 @@ class CodeArtsGateway:
                 except CodeArtsUpstreamError as exc:
                     last_error = exc
                     error_category = exc.category
+                    self.last_trace.update({"error_category": exc.category, "status_code": exc.status_code})
                     if emitted:
                         self._mark_failure(account_id, model, exc)
                         raise
@@ -362,6 +390,7 @@ class CodeArtsGateway:
                     )
 
                 if attempt_success:
+                    self.last_trace.update({"success": True, "usage": self._usage(client), "error_category": "", "status_code": 200})
                     self._mark_success(account_id, model)
                     self._complete_context(
                         context,

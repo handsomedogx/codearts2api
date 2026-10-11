@@ -14,6 +14,7 @@ def test_health_and_models_exist(tmp_path) -> None:
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -39,6 +40,7 @@ def test_chat_requires_credentials(tmp_path) -> None:
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -48,6 +50,10 @@ def test_chat_requires_credentials(tmp_path) -> None:
             json={"model": "codearts-auto", "messages": [{"role": "user", "content": "hello"}]},
         )
         assert response.status_code == 503
+        logs = client.get("/api/ui/logs?time_range=all").json()
+        assert logs["items"][0]["success"] is False
+        assert logs["items"][0]["status"] == 503
+        assert logs["items"][0]["error_category"] == "no_account"
     finally:
         app.dependency_overrides.clear()
 
@@ -62,6 +68,7 @@ def _credentialed_settings(tmp_path) -> Settings:
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
     )
 
 
@@ -78,6 +85,7 @@ def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
         client = TestClient(app)
         response = client.post(
             "/v1/chat/completions",
+            headers={"X-Forwarded-For": "198.51.100.9, 10.0.0.1", "User-Agent": "deepseek-harness/test"},
             json={"model": "codearts-auto", "messages": [{"role": "user", "content": "hello"}]},
         )
         assert response.status_code == 200
@@ -86,6 +94,16 @@ def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
         assert body["choices"][0]["message"]["content"] == "Hello from CodeArts"
         assert body["choices"][0]["finish_reason"] == "stop"
         assert body["usage"] == {"prompt_tokens": 97, "completion_tokens": 2, "total_tokens": 99}
+        logs = client.get("/api/ui/logs?time_range=all").json()["items"]
+        assert len(logs) == 1
+        item = logs[0]
+        assert item["success"] is True
+        assert item["model"] == "codearts-auto"
+        assert item["source_ip"] == "198.51.100.9"
+        assert item["user_agent"] == "deepseek-harness/test"
+        assert item["total_tokens"] == 99
+        assert item["attempts"] == 1
+        assert item["request_id"] == response.headers["X-Request-ID"]
     finally:
         app.dependency_overrides.clear()
 
@@ -110,6 +128,11 @@ def test_streaming_openai_translation(monkeypatch, tmp_path) -> None:
         assert '"content":"lo"' in text
         assert '"finish_reason":"stop"' in text
         assert "data: [DONE]" in text
+        logs = client.get("/api/ui/logs?time_range=all").json()["items"]
+        assert len(logs) == 1
+        assert logs[0]["stream"] is True
+        assert logs[0]["success"] is True
+        assert logs[0]["attempts"] == 1
     finally:
         app.dependency_overrides.clear()
 
@@ -124,6 +147,7 @@ def test_auth_endpoints_do_not_expose_secrets(tmp_path) -> None:
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -156,7 +180,7 @@ def test_web_ui_and_ui_meta_exist() -> None:
     assert meta.status_code == 200
     body = meta.json()
     assert body["name"] == "codearts2api"
-    assert body["version"] == "0.6.0"
+    assert body["version"] == "0.7.0"
     assert body["api_base"] == "/v1"
     assert "api_key_enabled" in body
 
@@ -204,20 +228,79 @@ def test_account_pool_uses_compact_real_metrics_table() -> None:
     assert '"Usage":"用量"' in i18n.text
 
 
-def test_ui_logs_are_sanitized() -> None:
+def test_request_logs_ui_has_dense_filters() -> None:
     client = TestClient(app)
-    client.get("/health")
-    response = client.get("/api/ui/logs")
-    assert response.status_code == 200
-    items = response.json()["items"]
-    assert items
-    allowed = {"time", "method", "path", "status", "duration_ms"}
-    assert set(items[0]) == allowed
-    serialized = str(items).lower()
-    assert "authorization" not in serialized
-    assert "access_key" not in serialized
-    assert "secret" not in serialized
+    root = client.get("/")
+    assert root.status_code == 200
+    for control in ("logsSearch", "logsResult", "logsRange", "logsLimit", "logsSummaryText", "logsArchiveText"):
+        assert f'id="{control}"' in root.text
+    for heading in ("Result", "Model", "Account", "Source IP", "User-Agent", "Duration", "Tokens", "Attempts", "Request ID"):
+        assert f">{heading}<" in root.text
+    app_js = client.get("/static/app.js").text
+    assert "archive_size_bytes" in app_js
+    assert "time_range" in app_js
+    assert "X-Request-ID" not in app_js  # generated and persisted server-side only
 
+
+def test_ui_logs_are_sanitized(tmp_path) -> None:
+    from app.codearts.request_logs import get_request_log_store
+
+    settings = Settings(
+        pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
+    )
+    store = get_request_log_store(settings)
+    started = store.begin()
+    store.finish(started, {
+        "request_id": "req-test", "status": 200, "success": True, "model": "GLM-5.2",
+        "account_id": "acc-1", "account_name": "Tester", "environment": "international",
+        "source_ip": "203.0.113.7", "user_agent": "test-agent/1.0",
+        "usage": {"prompt_tokens": 97, "completion_tokens": 2, "total_tokens": 99},
+        "attempts": 1, "conversation_id": "conv-1",
+    })
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        client = TestClient(app)
+        response = client.get("/api/ui/logs?time_range=all")
+        assert response.status_code == 200
+        body = response.json()
+        items = body["items"]
+        assert len(items) == 1
+        assert items[0]["model"] == "GLM-5.2"
+        assert items[0]["total_tokens"] == 99
+        assert items[0]["source_ip"] == "203.0.113.7"
+        assert body["summary"]["success_rate"] == 100.0
+        assert body["archive_size_bytes"] > 0
+        serialized = str(items).lower()
+        for secret in ("authorization", "access_key", "secret_access_key", "refresh_token", "security_token", "dpop"):
+            assert secret not in serialized
+    finally:
+        app.dependency_overrides.clear()
+
+
+
+def test_request_log_filters_and_summary(tmp_path) -> None:
+    from app.codearts.request_logs import RequestLogStore
+
+    settings = Settings(request_logs_file=str(tmp_path / "requests.jsonl"))
+    store = RequestLogStore(settings)
+    for success, model, account, status in ((True, "GLM-5.2", "a", 200), (False, "GLM-5.1", "b", 502)):
+        started = store.begin()
+        store.finish(started, {
+            "request_id": f"req-{account}", "status": status, "success": success,
+            "model": model, "account_id": account, "account_name": f"user-{account}",
+            "source_ip": "203.0.113.9", "user_agent": "unit-test", "attempts": 1,
+        })
+    all_rows = store.query(time_range="all", limit=100)
+    assert all_rows["summary"]["completed"] == 2
+    assert all_rows["summary"]["success_rate"] == 50.0
+    assert all_rows["summary"]["http_success_rate"] == 50.0
+    assert store.query(time_range="all", result="failure")["items"][0]["model"] == "GLM-5.1"
+    assert store.query(time_range="all", q="user-a")["items"][0]["account_id"] == "a"
 
 def test_oauth_callback_returns_popup_completion_page(monkeypatch, tmp_path) -> None:
     from app.codearts.auth import AuthManager
@@ -229,6 +312,7 @@ def test_oauth_callback_returns_popup_completion_page(monkeypatch, tmp_path) -> 
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
     )
 
     async def fake_exchange(self, code, environment=None):

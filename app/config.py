@@ -124,6 +124,7 @@ class Settings:
     subscription_cache_ttl_seconds: int = int(os.getenv("CODEARTS_SUBSCRIPTION_CACHE_TTL_SECONDS", "60"))
     conversations_dir: str = os.getenv("CODEARTS_CONVERSATIONS_DIR", "data/conversations")
     usage_file: str = os.getenv("CODEARTS_USAGE_FILE", "data/usage.jsonl")
+    request_logs_file: str = os.getenv("CODEARTS_REQUEST_LOGS_FILE", "data/request_logs.jsonl")
 
     access_key_id: str = os.getenv("CODEARTS_ACCESS_KEY_ID", "")
     secret_access_key: str = os.getenv("CODEARTS_SECRET_ACCESS_KEY", "")
