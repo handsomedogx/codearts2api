@@ -19,8 +19,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
+from app.codearts.account_pool import AccountPool
 from app.codearts.signer import sign_request
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, normalize_environment
 
 
 def _b64url(data: bytes) -> str:
@@ -117,10 +118,10 @@ class AuthManager:
         self.settings = settings
         self._transport = transport
         self._refresh_lock = asyncio.Lock()
+        self.pool = AccountPool(settings)
 
-    @property
-    def credentials_path(self) -> Path:
-        return Path(self.settings.credentials_file)
+    def _environment(self, environment: str | None = None) -> str:
+        return normalize_environment(environment or self.settings.default_environment)
 
     @property
     def pending_path(self) -> Path:
@@ -141,8 +142,13 @@ class AuthManager:
         temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temp, path)
 
-    def begin_login(self) -> str:
+    def begin_login_session(self, environment: str | None = None) -> dict[str, str]:
+        selected = self._environment(environment)
+        profile = self.settings.profile(selected)
+        account_id = uuid.uuid4().hex
         context = {
+            "account_id": account_id,
+            "environment": selected,
             "pkce_pair": generate_pkce(),
             "dpop_key_pair": generate_dpop_keypair(),
             "ticket_id": str(uuid.uuid4()),
@@ -165,18 +171,33 @@ class AuthManager:
             "plugin-name": self.settings.plugin_name,
             "plugin-version": self.settings.plugin_version,
         }
-        return f"{self.settings.authorize_url}?{urlencode(params)}"
+        if profile.quickcompfalg:
+            params["quickcompfalg"] = "1"
+        return {
+            "account_id": account_id,
+            "environment": selected,
+            "authorize_url": f"{profile.authorize_url}?{urlencode(params)}",
+        }
 
-    async def _token_request(self, context: dict[str, Any], form: dict[str, str]) -> dict[str, Any]:
+    def begin_login(self, environment: str | None = None) -> str:
+        return self.begin_login_session(environment)["authorize_url"]
+
+    async def _token_request(
+        self,
+        context: dict[str, Any],
+        form: dict[str, str],
+        environment: str,
+    ) -> dict[str, Any]:
+        profile = self.settings.profile(environment)
         dpop = sign_dpop(
             keypair=context["dpop_key_pair"],
             method="POST",
-            url=self.settings.token_url,
+            url=profile.token_url,
         )
         timeout = httpx.Timeout(15.0)
         async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             response = await client.post(
-                self.settings.token_url,
+                profile.token_url,
                 headers={
                     "DPoP": dpop,
                     "Content-Type": "application/x-www-form-urlencoded",
@@ -191,10 +212,11 @@ class AuthManager:
             raise RuntimeError("CodeArts OAuth response is missing credentials")
         return payload
 
-    async def _query_identity(self, credentials: dict[str, Any]) -> dict[str, Any]:
+    async def _query_identity(self, credentials: dict[str, Any], environment: str) -> dict[str, Any]:
+        profile = self.settings.profile(environment)
         signed = sign_request(
             method="GET",
-            url=self.settings.caller_identity_url,
+            url=profile.caller_identity_url,
             headers={"Content-Type": "application/json"},
             data=None,
             access_key_id=str(credentials.get("access_key_id", "")),
@@ -203,7 +225,7 @@ class AuthManager:
         )
         timeout = httpx.Timeout(15.0)
         async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
-            response = await client.get(self.settings.caller_identity_url, headers=signed.headers)
+            response = await client.get(profile.caller_identity_url, headers=signed.headers)
         if response.status_code >= 400:
             raise RuntimeError(f"CodeArts caller identity HTTP {response.status_code}: {response.text[:1200]}")
         payload = response.json()
@@ -214,6 +236,7 @@ class AuthManager:
         *,
         token_payload: dict[str, Any],
         context: dict[str, Any],
+        environment: str,
         previous: dict[str, Any] | None = None,
         identity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -224,6 +247,7 @@ class AuthManager:
         user_name = principal_urn.rsplit(":", 1)[-1] if principal_urn else str(previous.get("user_name") or "")
         refresh_token = token_payload.get("refresh_token") or previous.get("refresh_token") or ""
         return {
+            "environment": environment,
             "access_key_id": str(credentials.get("access_key_id", "")),
             "secret_access_key": str(credentials.get("secret_access_key", "")),
             "security_token": str(credentials.get("security_token", "")),
@@ -240,10 +264,13 @@ class AuthManager:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    async def exchange_code(self, code: str) -> dict[str, Any]:
+    async def exchange_code(self, code: str, environment: str | None = None) -> dict[str, Any]:
         context = self._read_json(self.pending_path)
         if not context:
             raise RuntimeError("No pending CodeArts login. Open /auth/login first.")
+        selected = normalize_environment(str(context.get("environment") or self.settings.default_environment))
+        if environment is not None and normalize_environment(environment) != selected:
+            raise RuntimeError("Pending CodeArts login environment does not match callback environment")
         form = {
             "client_id": self.settings.auth_client_id,
             "code": code,
@@ -251,15 +278,22 @@ class AuthManager:
             "grant_type": "authorization_code",
             "redirect_uri": self.settings.callback_url,
         }
-        payload = await self._token_request(context, form)
-        identity = await self._query_identity(payload["credentials"])
-        record = self._build_record(token_payload=payload, context=context, identity=identity)
-        self._atomic_write_json(self.credentials_path, record)
+        payload = await self._token_request(context, form, selected)
+        identity = await self._query_identity(payload["credentials"], selected)
+        record = self._build_record(
+            token_payload=payload,
+            context=context,
+            environment=selected,
+            identity=identity,
+        )
+        account_id = str(context.get("account_id") or uuid.uuid4().hex)
+        record["id"] = account_id
+        record = self.pool.save(record, account_id)
         try:
             self.pending_path.unlink(missing_ok=True)
         except OSError:
             pass
-        return self.public_status(record)
+        return self.pool.public(record)
 
     def _parse_expiration(self, value: str) -> datetime | None:
         if not value:
@@ -278,13 +312,24 @@ class AuthManager:
             return False
         return expiration.timestamp() <= time.time() + self.settings.refresh_skew_seconds
 
-    async def refresh(self, *, force: bool = True) -> dict[str, Any]:
+
+    def list_accounts(self) -> list[dict[str, Any]]:
+        return self.pool.list_public()
+
+    def account_status(self, account_id: str) -> dict[str, Any]:
+        record = self.pool.get(account_id)
+        if not record:
+            raise RuntimeError("CodeArts account not found")
+        return self.pool.public(record)
+
+    async def refresh_account(self, account_id: str, *, force: bool = True) -> dict[str, Any]:
         async with self._refresh_lock:
-            record = self._read_json(self.credentials_path)
+            record = self.pool.get(account_id)
             if not record:
-                raise RuntimeError("No persisted CodeArts credentials")
+                raise RuntimeError("CodeArts account not found")
+            selected = normalize_environment(str(record.get("environment") or "cn"))
             if not force and not self._needs_refresh(record):
-                return self.public_status(record)
+                return self.pool.public(record)
             context = record.get("auth_context")
             refresh_token = str(record.get("refresh_token", ""))
             if not isinstance(context, dict) or not refresh_token:
@@ -295,82 +340,74 @@ class AuthManager:
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
             }
-            payload = await self._token_request(context, form)
+            payload = await self._token_request(context, form, selected)
             new_record = self._build_record(
                 token_payload=payload,
                 context=context,
+                environment=selected,
                 previous=record,
             )
-            # One atomic replace is critical because CodeArts rotates refresh_token.
-            self._atomic_write_json(self.credentials_path, new_record)
-            return self.public_status(new_record)
+            new_record["id"] = account_id
+            new_record = self.pool.save(new_record, account_id)
+            return self.pool.public(new_record)
 
-    async def get_credentials(self) -> ActiveCredentials | None:
-        record = self._read_json(self.credentials_path)
+    async def get_account_credentials(self, account_id: str) -> ActiveCredentials | None:
+        record = self.pool.get(account_id)
+        if not record:
+            return None
+        if self._needs_refresh(record) and record.get("refresh_token"):
+            await self.refresh_account(account_id, force=False)
+            record = self.pool.get(account_id) or record
+        access_key_id = str(record.get("access_key_id", ""))
+        secret_access_key = str(record.get("secret_access_key", ""))
+        if not access_key_id or not secret_access_key:
+            return None
+        return ActiveCredentials(
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            security_token=str(record.get("security_token", "")),
+            domain_id=str(record.get("domain_id", "")),
+            expires_at=str(record.get("expiration", "")),
+            source="account_pool",
+        )
+
+    async def choose_account(self, account_id: str | None = None) -> tuple[dict[str, Any], ActiveCredentials] | None:
+        record = self.pool.choose(account_id)
         if record:
-            if self._needs_refresh(record) and record.get("refresh_token"):
-                await self.refresh(force=False)
-                record = self._read_json(self.credentials_path) or record
-            access_key_id = str(record.get("access_key_id", ""))
-            secret_access_key = str(record.get("secret_access_key", ""))
-            if access_key_id and secret_access_key:
-                return ActiveCredentials(
-                    access_key_id=access_key_id,
-                    secret_access_key=secret_access_key,
-                    security_token=str(record.get("security_token", "")),
-                    domain_id=str(record.get("domain_id", "")),
-                    expires_at=str(record.get("expiration", "")),
-                    source="persisted",
+            selected_id = str(record.get("id") or "")
+            credentials = await self.get_account_credentials(selected_id)
+            if credentials is None:
+                return None
+            refreshed = self.pool.get(selected_id) or record
+            return self.pool.public(refreshed), credentials
+        if account_id:
+            return None
+        for environment in ("cn", "international"):
+            if self.settings.env_credentials_ready_for(environment):
+                credentials = ActiveCredentials(
+                    access_key_id=self.settings.access_key_id,
+                    secret_access_key=self.settings.secret_access_key,
+                    security_token=self.settings.security_token,
+                    domain_id=self.settings.domain_id,
+                    source="env",
                 )
-
-        if self.settings.env_credentials_ready:
-            return ActiveCredentials(
-                access_key_id=self.settings.access_key_id,
-                secret_access_key=self.settings.secret_access_key,
-                security_token=self.settings.security_token,
-                domain_id=self.settings.domain_id,
-                source="env",
-            )
+                return ({
+                    "id": f"manual-{environment}",
+                    "environment": environment,
+                    "environment_label": self.settings.profile(environment).label,
+                    "authenticated": True,
+                    "source": "env",
+                    "expires_at": "",
+                    "refresh_available": False,
+                    "user_id": "",
+                    "user_name": "",
+                    "domain_id": self.settings.domain_id,
+                }, credentials)
         return None
 
-    def public_status(self, record: dict[str, Any] | None = None) -> dict[str, Any]:
-        record = record if record is not None else self._read_json(self.credentials_path)
-        if record and record.get("access_key_id") and record.get("secret_access_key"):
-            return {
-                "authenticated": True,
-                "source": "persisted",
-                "expires_at": str(record.get("expiration", "")),
-                "refresh_available": bool(record.get("refresh_token") and record.get("auth_context")),
-                "user_id": str(record.get("user_id", "")),
-                "user_name": str(record.get("user_name", "")),
-                "domain_id": str(record.get("domain_id", "")),
-            }
-        if self.settings.env_credentials_ready:
-            return {
-                "authenticated": True,
-                "source": "env",
-                "expires_at": "",
-                "refresh_available": False,
-                "user_id": "",
-                "user_name": "",
-                "domain_id": self.settings.domain_id,
-            }
-        return {
-            "authenticated": False,
-            "source": "none",
-            "expires_at": "",
-            "refresh_available": False,
-            "user_id": "",
-            "user_name": "",
-            "domain_id": "",
-        }
+    def delete_account(self, account_id: str) -> bool:
+        return self.pool.delete(account_id)
 
-    def logout(self) -> None:
-        for path in (self.credentials_path, self.pending_path):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 _auth_manager: AuthManager | None = None

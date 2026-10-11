@@ -9,8 +9,9 @@ from app.main import app
 
 def test_health_and_models_exist(tmp_path) -> None:
     settings = Settings(
-        credentials_file=str(tmp_path / "none.json"),
         pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -31,8 +32,9 @@ def test_chat_requires_credentials(tmp_path) -> None:
     settings = Settings(
         access_key_id="",
         secret_access_key="",
-        credentials_file=str(tmp_path / "none.json"),
         pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -51,8 +53,9 @@ def _credentialed_settings(tmp_path) -> Settings:
         access_key_id="fake-ak",
         secret_access_key="fake-sk",
         security_token="fake-token",
-        credentials_file=str(tmp_path / "none.json"),
         pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
     )
 
 
@@ -108,20 +111,22 @@ def test_auth_endpoints_do_not_expose_secrets(tmp_path) -> None:
         port=8123,
         access_key_id="",
         secret_access_key="",
-        credentials_file=str(tmp_path / "credentials.json"),
         pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
         client = TestClient(app)
-        status = client.get("/auth/status")
-        assert status.status_code == 200
-        assert status.json()["authenticated"] is False
+        accounts = client.get("/api/ui/accounts")
+        assert accounts.status_code == 200
+        assert accounts.json()["items"] == []
 
         login = client.get("/auth/login-url")
         assert login.status_code == 200
         body = login.json()
         assert "codearts.huaweicloud.com/portal/authorize" in body["authorize_url"]
+        assert len(body["account_id"]) == 32
         assert body["callback_url"] == "http://127.0.0.1:8123/oauth/callback"
         assert "secret_access_key" not in login.text
         assert "refresh_token" not in login.text
@@ -141,9 +146,32 @@ def test_web_ui_and_ui_meta_exist() -> None:
     assert meta.status_code == 200
     body = meta.json()
     assert body["name"] == "codearts2api"
-    assert body["version"] == "0.3.0"
+    assert body["version"] == "0.4.0"
     assert body["api_base"] == "/v1"
     assert "api_key_enabled" in body
+
+
+def test_web_ui_has_bilingual_i18n_assets() -> None:
+    client = TestClient(app)
+    root = client.get("/")
+    assert root.status_code == 200
+    assert 'data-language="zh-CN"' in root.text
+    assert 'data-language="en"' in root.text
+    assert root.text.index("/static/i18n.js") < root.text.index("/static/app.js")
+
+    i18n = client.get("/static/i18n.js")
+    assert i18n.status_code == 200
+    assert "codearts2api.language" in i18n.text
+    assert "navigator.languages" in i18n.text
+    assert "概览" in i18n.text
+    assert "调试台" in i18n.text
+    assert "请求日志" in i18n.text
+    assert "codearts2api:languagechange" in i18n.text
+
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert "codearts2api:languagechange" in app_js.text
+    assert "window.codeartsI18n.tr" in app_js.text
 
 
 def test_ui_logs_are_sanitized() -> None:
@@ -159,3 +187,87 @@ def test_ui_logs_are_sanitized() -> None:
     assert "authorization" not in serialized
     assert "access_key" not in serialized
     assert "secret" not in serialized
+
+
+def test_oauth_callback_returns_popup_completion_page(monkeypatch, tmp_path) -> None:
+    from app.codearts.auth import AuthManager
+
+    settings = Settings(
+        port=8123,
+        pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
+    )
+
+    async def fake_exchange(self, code, environment=None):
+        assert code == "test-code"
+        return {
+            "authenticated": True,
+            "environment": "international",
+            "environment_label": "International",
+            "source": "persisted",
+            "expires_at": "",
+            "refresh_available": True,
+            "user_id": "safe-user",
+            "user_name": "safe-user",
+            "domain_id": "safe-domain",
+        }
+
+    monkeypatch.setattr(AuthManager, "exchange_code", fake_exchange)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        client = TestClient(app)
+        response = client.get("/oauth/callback?code=test-code", follow_redirects=False)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert "codearts2api:oauth-complete" in response.text
+        assert '"environment":"international"' in response.text
+        assert '"success":true' in response.text
+        assert "window.opener.postMessage" in response.text
+        assert "postMessage(payload, window.location.origin)" in response.text
+        assert "codearts2api.oauthEvent" in response.text
+        assert "window.close()" in response.text
+        assert "secret_access_key" not in response.text
+        assert "refresh_token" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_web_ui_login_chooser_and_popup_flow_assets() -> None:
+    client = TestClient(app)
+    root = client.get("/")
+    assert root.status_code == 200
+    assert 'id="loginModal"' in root.text
+    assert 'data-login-environment="cn"' in root.text
+    assert 'data-login-environment="international"' in root.text
+    assert 'id="loginSiteStep"' in root.text
+    assert 'id="loginAuthStep"' in root.text
+    assert 'id="loginAuthorizeUrl"' in root.text
+    assert 'id="copyAuthorizeUrlBtn"' in root.text
+    assert 'id="openAuthorizeUrlBtn"' in root.text
+    assert 'id="oauthWaitCard"' in root.text
+    assert 'id="accountList"' in root.text
+    assert 'id="routingStrategy"' in root.text
+    assert 'China mainland CodeArts service' not in root.text
+    assert 'International CodeArts service' not in root.text
+    assert 'login-site-arrow' not in root.text
+    assert 'Selecting a region only prepares an authorization link.' not in root.text
+    css = client.get("/static/app.css").text
+    assert 'grid-template-columns: repeat(2, minmax(0, 1fr))' in css
+    assert '@media (max-width: 460px)' in css
+
+    app_js = client.get("/static/app.js").text
+    assert '/auth/login-url?environment=' in app_js
+    assert 'body.account_id' in app_js
+    assert 'state.oauth.authorizeUrl = body.authorize_url' in app_js
+    assert 'window.open(state.oauth.authorizeUrl' in app_js
+    assert 'navigator.clipboard.writeText' in app_js
+    assert 'setInterval(checkOAuthCompletion, 1500)' in app_js
+    assert 'codearts2api:oauth-complete' in app_js
+    assert 'window.addEventListener("message"' in app_js
+    assert 'window.addEventListener("storage"' in app_js
+    assert '/api/ui/accounts' in app_js
+    assert 'popup.location.replace(body.authorize_url)' not in app_js
+    assert 'location.href = body.authorize_url' not in app_js
+    assert 'Use for API' not in app_js
+    assert 'environmentSelect' not in app_js

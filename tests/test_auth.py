@@ -78,8 +78,9 @@ def test_dpop_is_es256_with_public_jwk_and_valid_signature() -> None:
 def test_begin_login_matches_codearts_authorize_parameters(tmp_path) -> None:
     settings = Settings(
         port=8123,
-        credentials_file=str(tmp_path / "credentials.json"),
         pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
     )
     manager = AuthManager(settings)
     authorize_url = manager.begin_login()
@@ -153,8 +154,9 @@ def test_exchange_and_refresh_rotate_credentials_atomically(tmp_path) -> None:
 
     settings = Settings(
         port=8123,
-        credentials_file=str(tmp_path / "credentials.json"),
         pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
     )
     manager = AuthManager(settings, transport=httpx.MockTransport(handler))
     manager.begin_login()
@@ -165,22 +167,25 @@ def test_exchange_and_refresh_rotate_credentials_atomically(tmp_path) -> None:
     assert "access_key_id" not in status
     assert "refresh_token" not in status
 
-    first = json.loads((tmp_path / "credentials.json").read_text(encoding="utf-8"))
+    account_id = status["id"]
+    first = manager.pool.get(account_id)
+    assert first is not None
     assert first["access_key_id"] == "ak-1"
     assert first["refresh_token"] == "refresh-1"
     assert first["domain_id"] == "domain-1"
     assert "d" in first["auth_context"]["dpop_key_pair"]["private_jwk"]
 
-    refreshed = asyncio.run(manager.refresh(force=True))
+    refreshed = asyncio.run(manager.refresh_account(account_id, force=True))
     assert refreshed["authenticated"] is True
-    second = json.loads((tmp_path / "credentials.json").read_text(encoding="utf-8"))
+    second = manager.pool.get(account_id)
+    assert second is not None
     assert second["access_key_id"] == "ak-2"
     assert second["refresh_token"] == "refresh-2"
     assert second["secret_access_key"] == "sk-2"
     assert [form["grant_type"][0] for kind, form in calls if kind == "token"] == ["authorization_code", "refresh_token"]
 
 
-def test_get_credentials_lazily_refreshes_expired_record(tmp_path) -> None:
+def test_account_credentials_lazily_refresh_expired_record(tmp_path) -> None:
     future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -201,34 +206,36 @@ def test_get_credentials_lazily_refreshes_expired_record(tmp_path) -> None:
         )
 
     settings = Settings(
-        credentials_file=str(tmp_path / "credentials.json"),
         pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
     )
     manager = AuthManager(settings, transport=httpx.MockTransport(handler))
     manager.begin_login()
     pending = json.loads((tmp_path / "pending.json").read_text(encoding="utf-8"))
     expired = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
-    (tmp_path / "credentials.json").write_text(
-        json.dumps(
-            {
-                "access_key_id": "ak-old",
-                "secret_access_key": "sk-old",
-                "security_token": "st-old",
-                "expiration": expired,
-                "refresh_token": "refresh-old",
-                "domain_id": "domain-old",
-                "auth_context": {
-                    "pkce_pair": pending["pkce_pair"],
-                    "dpop_key_pair": pending["dpop_key_pair"],
-                },
-            }
-        ),
-        encoding="utf-8",
+    manager.pool.save(
+        {
+            "id": "expired-account",
+            "environment": "cn",
+            "access_key_id": "ak-old",
+            "secret_access_key": "sk-old",
+            "security_token": "st-old",
+            "expiration": expired,
+            "refresh_token": "refresh-old",
+            "domain_id": "domain-old",
+            "auth_context": {
+                "pkce_pair": pending["pkce_pair"],
+                "dpop_key_pair": pending["dpop_key_pair"],
+            },
+        },
+        "expired-account",
     )
 
-    credentials = asyncio.run(manager.get_credentials())
+    credentials = asyncio.run(manager.get_account_credentials("expired-account"))
     assert credentials is not None
     assert credentials.access_key_id == "ak-new"
     assert credentials.secret_access_key == "sk-new"
-    stored = json.loads((tmp_path / "credentials.json").read_text(encoding="utf-8"))
+    stored = manager.pool.get("expired-account")
+    assert stored is not None
     assert stored["refresh_token"] == "refresh-new"

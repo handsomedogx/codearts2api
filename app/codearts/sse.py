@@ -78,6 +78,13 @@ class TextDeltaTracker:
         lower_type = (event_type or "").lower()
         done = lower_type in {"done", "finish", "finished", "end", "completed"} or bool(payload.get("done"))
 
+        # Some CodeArts SSE variants wrap the sentinel in a text/content field
+        # instead of emitting a bare `data: [DONE]` event. Never surface that
+        # transport marker as assistant content.
+        sentinel_values = (payload.get("text"), payload.get("content"), payload.get("data"))
+        if any(value == "[DONE]" for value in sentinel_values):
+            return "", True
+
         error_code = payload.get("error_code")
         if error_code not in (None, "", 0, "0"):
             message = payload.get("error_msg") or payload.get("message") or f"CodeArts error {error_code}"

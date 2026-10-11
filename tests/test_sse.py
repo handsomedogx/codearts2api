@@ -43,3 +43,17 @@ def test_explicit_delta_is_not_deduplicated() -> None:
     d1, _ = tracker.extract(None, {"delta": {"content": "Hi"}})
     d2, _ = tracker.extract(None, {"delta": {"content": "!"}})
     assert d1 + d2 == "Hi!"
+
+
+def test_done_sentinel_wrapped_as_text_is_not_emitted() -> None:
+    tracker = TextDeltaTracker()
+    delta, done = tracker.extract(None, {"text": "[DONE]"})
+    assert delta == ""
+    assert done is True
+
+
+def test_done_sentinel_wrapped_as_content_is_not_emitted() -> None:
+    tracker = TextDeltaTracker()
+    delta, done = tracker.extract(None, {"content": "[DONE]"})
+    assert delta == ""
+    assert done is True

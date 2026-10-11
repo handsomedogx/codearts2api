@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import time
 import uuid
@@ -8,16 +9,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.codearts.auth import AuthManager, get_auth_manager
 from app.codearts.client import CodeArtsClient
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, normalize_environment
 from app.models import ChatCompletionRequest
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 REQUEST_LOGS: deque[dict] = deque(maxlen=200)
 
@@ -51,6 +52,80 @@ def _model_list(settings: Settings) -> list[str]:
     if settings.default_model not in items:
         items.insert(0, settings.default_model)
     return items or ["codearts-auto"]
+
+
+def _login_environment_or_400(value: str | None, settings: Settings) -> str:
+    try:
+        return normalize_environment(value or settings.default_environment)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _oauth_result_page(
+    *,
+    success: bool,
+    environment: str = "",
+    environment_label: str = "",
+    account_id: str = "",
+    error: str = "",
+) -> str:
+    title = "登录成功 / Login successful" if success else "登录失败 / Login failed"
+    message = (
+        "CodeArts 登录已完成，正在返回 codearts2api。 / CodeArts login completed. Returning to codearts2api."
+        if success
+        else "CodeArts 登录未完成。 / CodeArts login did not complete."
+    )
+    detail = html.escape(error[:800]) if error else ""
+    payload = {
+        "type": "codearts2api:oauth-complete",
+        "success": success,
+        "environment": environment,
+        "environment_label": environment_label,
+        "account_id": account_id,
+    }
+    if not success:
+        payload["error"] = "OAuth login failed"
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    detail_html = f'<pre class="detail">{detail}</pre>' if detail else ""
+    status_class = "success" if success else "error"
+    return f'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }}
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; background:#0b0d12; color:#e8e9ee; }}
+    .card {{ width:min(520px,calc(100vw - 40px)); border:1px solid #252a35; background:#11141b; border-radius:18px; padding:28px; box-shadow:0 22px 70px #0008; }}
+    .dot {{ width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:8px; vertical-align:1px; }}
+    .success .dot {{ background:#49d49d; box-shadow:0 0 18px #49d49d66; }}
+    .error .dot {{ background:#ff6b79; box-shadow:0 0 18px #ff6b7966; }}
+    h1 {{ font-size:20px; margin:0 0 10px; }}
+    p {{ color:#9298a6; line-height:1.65; margin:0; }}
+    .detail {{ margin:16px 0 0; padding:12px; white-space:pre-wrap; word-break:break-word; color:#c3c7d0; background:#0b0d12; border-radius:10px; border:1px solid #242936; font-size:11px; }}
+    button {{ margin-top:20px; border:1px solid #353b49; background:#191d26; color:#e8e9ee; border-radius:9px; padding:9px 13px; cursor:pointer; }}
+  </style>
+</head>
+<body>
+  <main class="card {status_class}">
+    <h1><span class="dot"></span>{title}</h1>
+    <p>{message}</p>
+    {detail_html}
+    <button type="button" onclick="window.close()">关闭窗口 / Close window</button>
+  </main>
+  <script>
+    const payload = {payload_json};
+    try {{
+      localStorage.setItem("codearts2api.oauthEvent", JSON.stringify({{...payload, at: Date.now()}}));
+    }} catch (_) {{}}
+    if (window.opener && !window.opener.closed) {{
+      window.opener.postMessage(payload, window.location.origin);
+    }}
+    if (payload.success) setTimeout(() => window.close(), 550);
+  </script>
+</body>
+</html>'''
 
 
 @app.middleware("http")
@@ -87,9 +162,42 @@ async def ui_meta(settings: Settings = Depends(get_settings)) -> dict:
         "version": APP_VERSION,
         "api_base": "/v1",
         "api_key_enabled": bool(settings.api_key),
-        "upstream": settings.base_url,
+        "environments": settings.public_environments(),
         "callback_url": settings.callback_url,
     }
+
+
+@app.get("/api/ui/accounts", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_accounts(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
+    return {"items": auth.list_accounts(), "routing": auth.pool.routing()}
+
+
+@app.post("/api/ui/accounts/{account_id}/refresh", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_account_refresh(account_id: str, auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
+    try:
+        return await auth.refresh_account(account_id, force=True)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.delete("/api/ui/accounts/{account_id}", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_account_delete(account_id: str, auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
+    if not auth.delete_account(account_id):
+        raise HTTPException(status_code=404, detail="CodeArts account not found")
+    return {"deleted": True, "account_id": account_id}
+
+
+@app.get("/api/ui/routing", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_routing(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
+    return auth.pool.routing()
+
+
+@app.post("/api/ui/routing", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_routing_update(payload: dict = Body(...), auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
+    try:
+        return auth.pool.set_routing(str(payload.get("strategy", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/ui/logs", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
@@ -102,63 +210,65 @@ async def health(
     settings: Settings = Depends(get_settings),
     auth: AuthManager = Depends(get_request_auth_manager),
 ) -> dict:
-    status = auth.public_status()
+    accounts = auth.list_accounts()
+    manual_ready = any(settings.env_credentials_ready_for(environment) for environment in ("cn", "international"))
     return {
         "status": "ok",
-        "credentials_configured": status["authenticated"],
-        "auth_source": status["source"],
-        "upstream": settings.base_url,
+        "credentials_configured": any(item.get("authenticated") for item in accounts) or manual_ready,
+        "account_count": len(accounts),
+        "routing_strategy": auth.pool.routing()["strategy"],
     }
 
 
 @app.get("/auth/login", dependencies=[Depends(require_local_api_key)])
-async def auth_login(auth: AuthManager = Depends(get_request_auth_manager)):
-    return RedirectResponse(auth.begin_login(), status_code=307)
+async def auth_login(
+    environment: str | None = Query(default=None),
+    settings: Settings = Depends(get_settings),
+    auth: AuthManager = Depends(get_request_auth_manager),
+):
+    selected = _login_environment_or_400(environment, settings)
+    return RedirectResponse(auth.begin_login(selected), status_code=307)
 
 
 @app.get("/auth/login-url", dependencies=[Depends(require_local_api_key)])
 async def auth_login_url(
+    environment: str | None = Query(default=None),
     settings: Settings = Depends(get_settings),
     auth: AuthManager = Depends(get_request_auth_manager),
 ) -> dict:
+    selected = _login_environment_or_400(environment, settings)
+    session = auth.begin_login_session(selected)
     return {
-        "authorize_url": auth.begin_login(),
+        **session,
         "callback_url": settings.callback_url,
     }
 
 
-@app.get("/oauth/callback")
+@app.get("/oauth/callback", response_class=HTMLResponse)
 async def oauth_callback(
     code: str | None = Query(default=None),
-    settings: Settings = Depends(get_settings),
     auth: AuthManager = Depends(get_request_auth_manager),
 ):
     if not code:
-        raise HTTPException(status_code=400, detail="OAuth callback is missing code")
+        return HTMLResponse(
+            _oauth_result_page(success=False, error="OAuth callback is missing code"),
+            status_code=400,
+        )
     try:
-        await auth.exchange_code(code)
+        status = await auth.exchange_code(code)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return RedirectResponse(settings.login_success_url, status_code=307)
-
-
-@app.get("/auth/status", dependencies=[Depends(require_local_api_key)])
-async def auth_status(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
-    return auth.public_status()
-
-
-@app.post("/auth/refresh", dependencies=[Depends(require_local_api_key)])
-async def auth_refresh(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
-    try:
-        return await auth.refresh(force=True)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.post("/auth/logout", dependencies=[Depends(require_local_api_key)])
-async def auth_logout(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
-    auth.logout()
-    return {"authenticated": False, "source": "none"}
+        return HTMLResponse(
+            _oauth_result_page(success=False, error=str(exc)),
+            status_code=502,
+        )
+    return HTMLResponse(
+        _oauth_result_page(
+            success=True,
+            environment=status["environment"],
+            environment_label=status["environment_label"],
+            account_id=status.get("id", ""),
+        )
+    )
 
 
 @app.get("/v1/models", dependencies=[Depends(require_local_api_key)])
@@ -190,14 +300,24 @@ async def chat_completions(
     request: ChatCompletionRequest,
     settings: Settings = Depends(get_settings),
     auth: AuthManager = Depends(get_request_auth_manager),
+    x_codearts_account: str | None = Header(default=None, alias="X-CodeArts-Account"),
 ):
-    if await auth.get_credentials() is None:
+    selected = await auth.choose_account(x_codearts_account)
+    if selected is None:
         raise HTTPException(
             status_code=503,
-            detail="CodeArts credentials are not configured. Open /auth/login to authenticate, or configure the manual credential fallback.",
+            detail="No usable CodeArts account is available. Add an account from the dashboard first.",
         )
-
-    client = CodeArtsClient(settings, auth_manager=auth)
+    account, credentials = selected
+    environment = account["environment"]
+    account_id = account["id"]
+    client = CodeArtsClient(
+        settings,
+        auth_manager=auth,
+        environment=environment,
+        account_id=account_id,
+        credentials=credentials,
+    )
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     messages = _messages(request)
 

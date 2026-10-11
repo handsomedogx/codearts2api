@@ -5,16 +5,17 @@ A local OpenAI-compatible gateway for Huawei CodeArts Agent APIs. It uses the us
 ## Current MVP
 
 - local dark Web UI at `http://127.0.0.1:8000/`
-- account/login dashboard, model status, streaming Playground and sanitized request logs
+- multi-account pool containing both China and International CodeArts accounts
+- automatic account routing (`round_robin` or `random`)
+- optional explicit account selection with `X-CodeArts-Account`
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - streaming and non-streaming OpenAI-style responses
 - Huawei `SDK-HMAC-SHA256` request signing
 - CodeArts OAuth Authorization Code + PKCE + ES256 DPoP login
-- persisted temporary AK/SK/Security Token
-- serialized rotating `refresh_token` renewal
-- lazy refresh before credentials expire
+- rotating refresh-token renewal and lazy refresh before expiry
+- sanitized request logs and bilingual Web UI
 - optional manual temporary-credential fallback
 
 ## Install and run
@@ -25,7 +26,7 @@ uv sync --dev
 uv run main.py
 ```
 
-Then open the management UI:
+Then open:
 
 ```text
 http://127.0.0.1:8000/
@@ -37,54 +38,79 @@ OpenAI-compatible base URL:
 http://127.0.0.1:8000/v1
 ```
 
-## Web UI
+## Account pool
 
-The local dashboard is served by the same FastAPI process and has no external CDN/runtime dependency. It includes:
+China and International are properties of accounts, not global gateway modes.
 
-- CodeArts account login/status/expiry
-- refresh and logout actions
-- API endpoint and client snippet
-- configured model list
-- streaming Chat Completions Playground
-- sanitized request/activity logs
-- local API-key browser configuration
+The pool can contain any mix of accounts:
 
-If `CODEARTS2API_API_KEY` is enabled, the dashboard stores the local gateway key only in the browser's `localStorage`; it is not written back to the server.
+```text
+Account Pool
+├─ China account A
+├─ China account B
+├─ International account C
+└─ International account D
+```
+
+A request is routed to an account first. That account's `environment` then determines the correct upstream endpoint and signing context.
+
+Default routing is `round_robin`. `random` can be selected in Settings. To force one request through a specific account, send:
+
+```text
+X-CodeArts-Account: <account-id>
+```
+
+Account records are stored independently under `data/accounts/`, so refresh-token rotation for one account does not overwrite another account.
+
+## China and International profiles
+
+CodeArts commercial service uses separate service profiles:
+
+- **China**: `codearts.huaweicloud.com` + `snap-access.cn-north-4.myhuaweicloud.com`
+- **International**: `codearts.ap-southeast-1.huaweicloud.com` + `snap-access.ap-southeast-1.myhuaweicloud.com`
+
+The official International/HK profile still exchanges OAuth tokens through `sts.cn-north-4.myhuaweicloud.com`, and its authorize request includes `quickcompfalg=1`.
+
+There is no global China/International switch in the normal request flow. Each stored account permanently carries its own environment.
 
 ## Login without CodeArts Agent
 
-With the API running, click **Login CodeArts** in the dashboard. The direct OAuth entry remains available at:
+Click **Add Account** in the dashboard, then choose **China** or **International** for the new account. The choice applies only to that account being created.
 
-```text
-http://127.0.0.1:8000/auth/login
-```
+The dashboard then prepares the official CodeArts authorization URL but does **not** open it automatically. You can copy the URL or click **Open authorization page**. While you authorize, the modal stays in a waiting state and polls the account pool using the pending account ID. A successful callback:
 
-The gateway creates a fresh PKCE verifier/challenge and P-256 DPoP key pair, then redirects to the official CodeArts authorization page. After the official site redirects back to:
+1. exchanges the authorization code for temporary Huawei credentials;
+2. creates a new account record in `data/accounts/`;
+3. is detected by the dashboard automatically, including when the URL was copied and opened manually;
+4. changes the authorization wizard from waiting to completed.
+
+The callback URL is:
 
 ```text
 http://127.0.0.1:8000/oauth/callback
 ```
 
-`codearts2api` exchanges the authorization code for temporary Huawei credentials and persists them in `credentials.json`. Both `credentials.json` and the temporary `auth_pending.json` are ignored by Git.
-
-Useful auth endpoints:
+Useful endpoints:
 
 ```text
-GET  /auth/login-url
-GET  /auth/status
-POST /auth/refresh
-POST /auth/logout
+GET    /auth/login-url?environment=cn
+GET    /auth/login-url?environment=international
+GET    /api/ui/accounts
+POST   /api/ui/accounts/{account_id}/refresh
+DELETE /api/ui/accounts/{account_id}
+GET    /api/ui/routing
+POST   /api/ui/routing
 ```
 
-`/auth/status` deliberately exposes only login state, expiry, user/domain identifiers and refresh availability. It never returns AK, SK, Security Token, refresh token, PKCE verifier, or the private DPoP key.
+Account APIs deliberately exclude AK, SK, Security Token, refresh token, PKCE verifier, and private DPoP keys.
 
 ## Credential refresh
 
-The CodeArts refresh token is rotating. The gateway serializes refresh operations with a process-wide async lock and writes the newly returned credentials with an atomic file replacement before they are used by later requests. Chat requests lazily refresh persisted credentials shortly before expiration.
+CodeArts refresh tokens rotate. Each account is refreshed independently and rewritten atomically. Chat requests lazily refresh the selected account shortly before its credentials expire.
 
 ## Manual credential fallback
 
-If OAuth cannot be used, copy `.env.example` to `.env` and fill the temporary credential variables:
+If OAuth cannot be used, copy `.env.example` to `.env` and fill:
 
 ```text
 CODEARTS_ACCESS_KEY_ID=
@@ -93,7 +119,7 @@ CODEARTS_SECURITY_TOKEN=
 CODEARTS_DOMAIN_ID=
 ```
 
-Persisted OAuth credentials take priority over this fallback.
+Manual credentials are scoped to one site with `CODEARTS_MANUAL_CREDENTIAL_ENVIRONMENT=cn` (or `international`) and are used only as a fallback when the account pool has no usable account.
 
 ## Local API protection
 

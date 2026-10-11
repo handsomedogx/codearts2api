@@ -3,5 +3,6 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .env
-credentials.json
-auth_pending.json
+data/accounts/
+data/routing.json
+data/oauth_pending.json

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -20,7 +20,7 @@
         </div>
       </div>
 
-      <nav class="nav" aria-label="主导航">
+      <nav class="nav" aria-label="Main navigation">
         <button class="nav-item active" data-view="dashboard">
           <svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
           Dashboard
@@ -55,17 +55,21 @@
           <h1 id="pageTitle">Dashboard</h1>
         </div>
         <div class="top-actions">
-          <button class="icon-button" id="refreshAllBtn" title="刷新">
+          <div class="language-switch" role="group" aria-label="Language">
+            <button class="language-button" type="button" data-language="zh-CN" aria-pressed="false">中</button>
+            <button class="language-button" type="button" data-language="en" aria-pressed="false">EN</button>
+          </div>
+          <button class="icon-button" id="refreshAllBtn" title="Refresh">
             <svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.7 6.7L4 11m16 2-2.7 4.3A7 7 0 0 1 5.8 15"/></svg>
           </button>
-          <button class="button primary small" id="topLoginBtn">Login CodeArts</button>
+          <button class="button primary small" id="topLoginBtn">Add Account</button>
         </div>
       </header>
 
       <div id="apiKeyBanner" class="banner hidden">
         <div>
-          <strong>Local API Key 已启用</strong>
-          <span>输入本地网关 API Key 后才能读取账号状态和调用模型。</span>
+          <strong>Local API Key is enabled</strong>
+          <span>Enter the local gateway API key to read account status and call models.</span>
         </div>
         <button class="button ghost small" data-goto="settings">Configure</button>
       </div>
@@ -75,36 +79,15 @@
           <article class="card account-card">
             <div class="card-head">
               <div>
-                <div class="label">CODEARTS ACCOUNT</div>
-                <h2>Authentication</h2>
+                <div class="label">CODEARTS ACCOUNT POOL</div>
+                <h2>Account Pool</h2>
               </div>
-              <span class="pill neutral" id="authPill">Checking</span>
+              <button class="button primary small" id="loginBtn">Add Account</button>
             </div>
-            <div class="account-main">
-              <div class="avatar" id="accountAvatar">CA</div>
-              <div class="account-copy">
-                <div class="account-name" id="accountName">Not connected</div>
-                <div class="muted" id="accountMeta">Sign in with your Huawei Cloud account</div>
-              </div>
-            </div>
-            <div class="stats-row">
-              <div class="mini-stat">
-                <span>Source</span>
-                <strong id="authSource">—</strong>
-              </div>
-              <div class="mini-stat">
-                <span>Expires</span>
-                <strong id="authExpiry">—</strong>
-              </div>
-              <div class="mini-stat">
-                <span>Refresh</span>
-                <strong id="authRefresh">—</strong>
-              </div>
-            </div>
-            <div class="button-row">
-              <button class="button primary" id="loginBtn">Login CodeArts</button>
-              <button class="button ghost hidden" id="refreshTokenBtn">Refresh token</button>
-              <button class="button danger ghost hidden" id="logoutBtn">Logout</button>
+            <div class="account-list" id="accountList"></div>
+            <div class="account-pool-note">
+              <span>Requests are routed automatically across usable accounts.</span>
+              <span class="pill neutral" id="routingPill">Round Robin</span>
             </div>
           </article>
 
@@ -120,7 +103,7 @@
               <span id="apiBaseUrl">http://127.0.0.1:8000/v1</span>
               <button class="copy-button" data-copy-target="apiBaseUrl">Copy</button>
             </div>
-            <p class="muted compact">OpenAI SDK、Cherry Studio 等客户端可直接指向此地址。</p>
+            <p class="muted compact">OpenAI SDK, Cherry Studio, and other clients can point directly to this endpoint.</p>
             <div class="code-preview">
               <div class="code-title"><span>Python / OpenAI</span><button class="text-button" id="copyPythonBtn">Copy</button></div>
               <pre id="pythonSnippet">from openai import OpenAI
@@ -140,7 +123,7 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
           </article>
           <article class="metric-card">
             <div class="metric-icon green"><svg viewBox="0 0 24 24"><path d="M7 12.5 10 16l7-8"/><circle cx="12" cy="12" r="9"/></svg></div>
-            <div><span>Upstream</span><strong id="upstreamState">Configured</strong><small id="upstreamHost">—</small></div>
+            <div><span>Accounts</span><strong id="accountCount">0</strong><small id="routingSummary">Round Robin routing</small></div>
           </article>
           <article class="metric-card">
             <div class="metric-icon amber"><svg viewBox="0 0 24 24"><path d="M12 3v18M8 7h6.5a3 3 0 0 1 0 6H9.5a3 3 0 0 0 0 6H16"/></svg></div>
@@ -187,7 +170,7 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
             <textarea class="input textarea small-area" id="systemPrompt" placeholder="You are a helpful coding assistant."></textarea>
 
             <label class="field-label" for="userPrompt">Message</label>
-            <textarea class="input textarea" id="userPrompt" placeholder="向 CodeArts 发送一条消息…"></textarea>
+            <textarea class="input textarea" id="userPrompt" placeholder="Send a message to CodeArts…"></textarea>
             <div class="composer-actions">
               <span class="muted" id="playgroundHint">Ctrl + Enter to send</span>
               <button class="button primary" id="sendBtn">
@@ -233,7 +216,7 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
         <div class="settings-grid">
           <article class="card">
             <div class="card-head"><div><div class="label">SECURITY</div><h2>Local API Key</h2></div></div>
-            <p class="muted">如果 `.env` 中配置了 <code>CODEARTS2API_API_KEY</code>，在这里输入相同的 Key。它仅保存在当前浏览器的 localStorage。</p>
+            <p class="muted" id="apiKeyHelp">If <code>CODEARTS2API_API_KEY</code> is configured in <code>.env</code>, enter the same key here. It is stored only in this browser's localStorage.</p>
             <label class="field-label" for="localApiKey">API Key</label>
             <div class="input-row">
               <input class="input" id="localApiKey" type="password" autocomplete="off" placeholder="sk-local-…" />
@@ -246,8 +229,8 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
             <div class="card-head"><div><div class="label">SYSTEM</div><h2>Gateway details</h2></div></div>
             <div class="config-list">
               <div class="config-row"><span>Version</span><code id="settingsVersion">—</code></div>
-              <div class="config-row"><span>Upstream</span><code id="settingsUpstream">—</code></div>
               <div class="config-row"><span>OAuth callback</span><code id="settingsCallback">—</code></div>
+              <div class="config-row"><span>Account routing</span><select class="compact-select" id="routingStrategy"><option value="round_robin">Round Robin</option><option value="random">Random</option></select></div>
               <div class="config-row"><span>OpenAPI</span><a href="/docs" target="_blank">/docs ↗</a></div>
             </div>
           </article>
@@ -256,7 +239,68 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
     </main>
   </div>
 
+  <div class="modal-overlay hidden" id="loginModal" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
+    <div class="modal-panel login-modal-panel">
+      <div class="modal-head">
+        <div>
+          <div class="label">CODEARTS LOGIN</div>
+          <h2 id="loginModalTitle">Add CodeArts account</h2>
+          <p class="muted compact" id="loginModalSubtitle">Choose the account region to start authorization.</p>
+        </div>
+        <button class="modal-close" id="closeLoginModalBtn" type="button" aria-label="Close">×</button>
+      </div>
+
+      <div id="loginSiteStep" class="login-step">
+        <div class="login-site-list">
+          <button class="login-site-card" type="button" data-login-environment="cn">
+            <span class="login-region-mark">CN</span>
+            <span class="login-site-main">
+              <strong>China</strong>
+            </span>
+          </button>
+          <button class="login-site-card" type="button" data-login-environment="international">
+            <span class="login-region-mark">INTL</span>
+            <span class="login-site-main">
+              <strong>International</strong>
+            </span>
+          </button>
+        </div>
+      </div>
+
+      <div id="loginAuthStep" class="login-step hidden">
+        <div class="oauth-step-head">
+          <button class="text-button oauth-back" id="loginBackBtn" type="button">← Change region</button>
+          <span class="pill neutral" id="loginSelectedRegion">China</span>
+        </div>
+
+        <div class="oauth-url-section">
+          <label class="field-label" for="loginAuthorizeUrl">Authorization address</label>
+          <div class="oauth-url-box">
+            <textarea id="loginAuthorizeUrl" class="oauth-url-input" readonly spellcheck="false"></textarea>
+          </div>
+          <p class="muted compact">Copy this address, or open it in a separate window to authorize your CodeArts account.</p>
+          <div class="oauth-actions">
+            <button class="button ghost" id="copyAuthorizeUrlBtn" type="button">Copy address</button>
+            <button class="button primary" id="openAuthorizeUrlBtn" type="button">Open authorization page ↗</button>
+          </div>
+        </div>
+
+        <div class="oauth-wait-card" id="oauthWaitCard">
+          <span class="oauth-wait-indicator" id="oauthWaitIndicator" aria-hidden="true"></span>
+          <div>
+            <strong id="oauthWaitTitle">Waiting for authorization</strong>
+            <p id="oauthWaitText">Keep this window open. The account pool will update automatically after authorization succeeds.</p>
+          </div>
+        </div>
+        <div class="oauth-success-actions hidden" id="oauthSuccessActions">
+          <button class="button primary" id="oauthDoneBtn" type="button">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-stack" id="toastStack"></div>
+  <script src="/static/i18n.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

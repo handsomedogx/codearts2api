@@ -5,7 +5,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from app.codearts.auth import AuthManager, get_auth_manager
+from app.codearts.auth import ActiveCredentials, AuthManager, get_auth_manager
 from app.codearts.signer import sign_request
 from app.codearts.sse import TextDeltaTracker, decode_payload, parse_sse
 from app.config import Settings
@@ -17,10 +17,17 @@ class CodeArtsClient:
         settings: Settings,
         transport: httpx.AsyncBaseTransport | None = None,
         auth_manager: AuthManager | None = None,
+        environment: str | None = None,
+        account_id: str | None = None,
+        credentials: ActiveCredentials | None = None,
     ) -> None:
         self.settings = settings
         self._transport = transport
         self._auth_manager = auth_manager or get_auth_manager()
+        self.environment = environment or settings.default_environment
+        self.account_id = account_id
+        self._credentials = credentials
+        self.chat_url = settings.chat_url_for(self.environment)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -38,17 +45,64 @@ class CodeArtsClient:
             "is_confidential": "false",
         }
 
+    @staticmethod
+    def _message_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") in {None, "text", "input_text"}:
+                value = item.get("text") or item.get("content")
+                if isinstance(value, str):
+                    parts.append(value)
+        return "\n".join(part for part in parts if part)
+
+    @classmethod
+    def _codearts_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+        """Translate OpenAI chat history to CodeArts content blocks.
+
+        The official CodeArts Agent sends the current question to /v1/chat/chat as
+        content blocks such as {type: "text", content: "..."}, not OpenAI
+        {role, content} messages. Because this gateway is stateless across OpenAI
+        requests for now, earlier turns are folded into one text block with role
+        labels while the common single-user-message case remains byte-for-byte
+        just the user's text.
+        """
+        normalized: list[tuple[str, str]] = []
+        for message in messages:
+            text = cls._message_text(message.get("content"))
+            if text:
+                normalized.append((str(message.get("role") or "user"), text))
+        if not normalized:
+            raise ValueError("At least one textual chat message is required")
+        if len(normalized) == 1 and normalized[0][0] == "user":
+            prompt = normalized[0][1]
+        else:
+            labels = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool"}
+            prompt = "\n\n".join(f"{labels.get(role, role.title())}:\n{text}" for role, text in normalized)
+        return [{"type": "text", "content": prompt}]
+
     def _body(self, *, messages: list[dict[str, Any]], model: str, user: str | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {
             "chat_id": uuid.uuid4().hex,
-            "messages": messages,
+            "messages": self._codearts_messages(messages),
             "client": "IDE",
-            "task_parameters": {"ide": self.settings.ide_name},
+            "task": "chat",
+            "task_parameters": {
+                "ide": self.settings.ide_name,
+                "preferred_language": self.settings.language,
+                "enable_code_interpreter": False,
+                "projectLevelPrompt": "",
+            },
             "batch_task_parameters": [],
             "attempt": 1,
-            "master_body": {},
-            "mcp_servers": [],
-            "query_optimize": True,
             "is_delta_response": False,
             "not_allow_external_model": False,
         }
@@ -65,14 +119,16 @@ class CodeArtsClient:
         model: str,
         user: str | None = None,
     ) -> AsyncIterator[str]:
-        credentials = await self._auth_manager.get_credentials()
+        credentials = self._credentials
+        if credentials is None and self.account_id:
+            credentials = await self._auth_manager.get_account_credentials(self.account_id)
         if credentials is None:
-            raise RuntimeError("CodeArts credentials are not configured; open /auth/login first")
+            raise RuntimeError("CodeArts credentials are not configured; add an account first")
 
         body = self._body(messages=messages, model=model, user=user)
         signed = sign_request(
             method="POST",
-            url=self.settings.chat_url,
+            url=self.chat_url,
             headers=self._headers(),
             data=body,
             access_key_id=credentials.access_key_id,
@@ -86,7 +142,7 @@ class CodeArtsClient:
         async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             async with client.stream(
                 "POST",
-                self.settings.chat_url,
+                self.chat_url,
                 headers=signed.headers,
                 content=signed.body,
             ) as response:
