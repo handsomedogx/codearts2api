@@ -24,11 +24,21 @@ A local OpenAI-compatible gateway for Huawei CodeArts Agent APIs. It uses the us
 
 ## Install and run
 
+The Go implementation is the primary runtime. It builds to a single executable with the Web UI embedded.
+
 ```powershell
 cd "$env:USERPROFILE\Desktop\codearts2api"
-uv sync --dev
-uv run main.py
+go build -trimpath -ldflags="-s -w" -o codearts2api.exe ./cmd/codearts2api
+.\codearts2api.exe
 ```
+
+For development you can also run it directly:
+
+```powershell
+go run ./cmd/codearts2api
+```
+
+The previous Python/FastAPI implementation remains in `app/` as a protocol/behavior reference during the transition, but it is no longer the default runtime.
 
 Then open:
 
@@ -105,7 +115,7 @@ For streaming requests, failover is allowed only before the first response delta
 
 ### Keepalive and active account probes
 
-A lightweight keepalive service runs in the FastAPI lifespan when `CODEARTS_KEEPALIVE_ENABLED=true`. It periodically probes accounts that have not been checked within `CODEARTS_KEEPALIVE_INTERVAL_SECONDS` (default 24 hours). For OAuth accounts it refreshes the rotating token and then calls the lightweight CodeArts builtin-model endpoint to verify the upstream session without creating a chat or consuming model tokens.
+A lightweight keepalive service runs in the Go runtime when `CODEARTS_KEEPALIVE_ENABLED=true`. It periodically probes accounts that have not been checked within `CODEARTS_KEEPALIVE_INTERVAL_SECONDS` (default 24 hours). For OAuth accounts it verifies the lightweight CodeArts builtin-model endpoint, refreshes rotating credentials when appropriate, and distinguishes terminal login failures from transient network failures without creating a chat or consuming model tokens.
 
 The probe distinguishes terminal authentication failures (for example `401/403` or `invalid_grant`) from transient network/probe errors. Terminal failures set `needs_relogin`; transient network errors are recorded without disabling an otherwise healthy account. Accounts are probed serially with `CODEARTS_KEEPALIVE_ACCOUNT_GAP_SECONDS` between accounts.
 
@@ -227,14 +237,23 @@ CODEARTS2API_PORT=8000
 
 To serve another device on the LAN, intentionally bind `CODEARTS2API_HOST=0.0.0.0`, allow the port in the firewall, and use the machine's LAN address as the Base URL. Keep Dashboard management local to the server. For public deployments, put HTTPS/reverse-proxy access control in front of the gateway instead of exposing the development port directly.
 
-Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. When that override is present it replaces the generated key and Dashboard regeneration is disabled. CodeArts service endpoints, OAuth metadata, retry/cooldown values and storage paths also retain environment-variable overrides in `app/config.py`, but they are advanced tuning knobs and are deliberately omitted from the normal `.env.example`.
+Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. When that override is present it replaces the generated key and Dashboard regeneration is disabled. The Go runtime loads `.env` automatically and supports the same CodeArts service endpoint, OAuth metadata, retry/cooldown, keepalive and storage-path environment variables as the Python reference implementation; these are advanced tuning knobs and are deliberately omitted from the normal `.env.example`.
 
 There is no manual AK/SK credential fallback: CodeArts credentials enter the pool only through the supported OAuth account flow.
 
 ## Tests
 
+The primary Go runtime is validated with:
+
+```powershell
+go test ./...
+go vet ./...
+```
+
+The retained Python reference suite can still be run separately when checking behavior parity:
+
 ```powershell
 uv run pytest -q
 ```
 
-OAuth tests use `httpx.MockTransport`; they do not send fake credentials or fake authorization codes to Huawei services.
+All OAuth/upstream tests use local mock servers/transports; they do not send fake credentials or fake authorization codes to Huawei services.

@@ -10,3 +10,5 @@ data/conversations/
 data/usage.jsonl
 data/request_logs.jsonl
 data/settings.json
+/internal/*/data/
+codearts2api.exe
