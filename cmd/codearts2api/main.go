@@ -18,7 +18,10 @@ func main() {
 		addr = fmt.Sprintf("%s:%d", settings.Host, settings.Port)
 	}
 
-	handler, stopRuntime := server.NewRuntime()
+	handler, stopRuntime, err := server.NewRuntime()
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer stopRuntime()
 
 	srv := &http.Server{

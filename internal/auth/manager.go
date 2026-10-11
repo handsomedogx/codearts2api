@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/handsomedogx/codearts2api/internal/config"
+	"github.com/handsomedogx/codearts2api/internal/securestore"
 	"github.com/handsomedogx/codearts2api/internal/signer"
 )
 
@@ -73,6 +74,31 @@ type AccountRecord struct {
 	UpdatedAt       string         `json:"updated_at"`
 }
 
+type accountSecrets struct {
+	AccessKeyID     string         `json:"access_key_id"`
+	SecretAccessKey string         `json:"secret_access_key"`
+	SecurityToken   string         `json:"security_token"`
+	RefreshToken    string         `json:"refresh_token"`
+	AuthContext     map[string]any `json:"auth_context"`
+}
+
+type storedAccount struct {
+	Version      int            `json:"version"`
+	Protection   string         `json:"protection,omitempty"`
+	Protected    string         `json:"protected,omitempty"`
+	ID           string         `json:"id"`
+	Environment  string         `json:"environment"`
+	Expiration   string         `json:"expiration"`
+	DomainID     string         `json:"domain_id"`
+	UserID       string         `json:"user_id"`
+	UserName     string         `json:"user_name"`
+	PrincipalURN string         `json:"principal_urn"`
+	Stats        map[string]any `json:"stats"`
+	Health       map[string]any `json:"health"`
+	ModelHealth  map[string]any `json:"model_health"`
+	UpdatedAt    string         `json:"updated_at"`
+}
+
 type PublicAccount struct {
 	ID               string         `json:"id"`
 	Environment      string         `json:"environment"`
@@ -128,7 +154,7 @@ func (m *Manager) BeginLoginSession(environment string) (LoginSession, error) {
 		TicketID:    ticketID,
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if err := atomicWriteJSON(m.Settings.PendingAuthFile, pending); err != nil {
+	if err := m.writePending(pending); err != nil {
 		return LoginSession{}, err
 	}
 
@@ -220,18 +246,47 @@ func (m *Manager) ExchangeCode(code string) (PublicAccount, error) {
 }
 
 func (m *Manager) readPending() (PendingLogin, error) {
-	payload, err := os.ReadFile(m.Settings.PendingAuthFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return PendingLogin{}, fmt.Errorf("No pending CodeArts login. Open /auth/login first.")
+	paths := []string{m.Settings.PendingAuthFile}
+	if m.Settings.MigrateLegacy {
+		paths = append(paths, filepath.Join(m.Settings.LegacyDataDir, "oauth_pending.json"))
+	}
+	var lastErr error
+	for _, path := range paths {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			lastErr = err
+			continue
 		}
-		return PendingLogin{}, err
+		var context PendingLogin
+		protected, err := securestore.UnmarshalProtectedJSON(payload, &context)
+		if err != nil {
+			return PendingLogin{}, fmt.Errorf("invalid pending CodeArts login: %w", err)
+		}
+		if securestore.Available() && (!protected || filepath.Clean(path) != filepath.Clean(m.Settings.PendingAuthFile)) {
+			if err := m.writePending(context); err != nil {
+				return PendingLogin{}, err
+			}
+			if filepath.Clean(path) != filepath.Clean(m.Settings.PendingAuthFile) {
+				_ = os.Remove(path)
+			}
+		}
+		return context, nil
 	}
-	var context PendingLogin
-	if err := json.Unmarshal(payload, &context); err != nil {
-		return PendingLogin{}, fmt.Errorf("invalid pending CodeArts login: %w", err)
+	if lastErr != nil {
+		return PendingLogin{}, lastErr
 	}
-	return context, nil
+	return PendingLogin{}, fmt.Errorf("No pending CodeArts login. Open /auth/login first.")
+}
+
+func (m *Manager) writePending(context PendingLogin) error {
+	payload, err := securestore.MarshalProtectedJSON(context)
+	if err != nil {
+		return err
+	}
+	return atomicWriteBytes(m.Settings.PendingAuthFile, payload)
 }
 
 func (m *Manager) tokenRequest(context PendingLogin, profile config.Profile, form url.Values) (TokenPayload, error) {
@@ -309,7 +364,29 @@ func (m *Manager) saveAccount(record AccountRecord) error {
 		return fmt.Errorf("account id is required")
 	}
 	path := filepath.Join(m.Settings.AccountsDir, record.ID+".json")
-	return atomicWriteJSON(path, record)
+	if !securestore.Available() {
+		return atomicWriteJSON(path, record)
+	}
+	secretPayload, err := json.Marshal(accountSecrets{
+		AccessKeyID: record.AccessKeyID, SecretAccessKey: record.SecretAccessKey,
+		SecurityToken: record.SecurityToken, RefreshToken: record.RefreshToken,
+		AuthContext: record.AuthContext,
+	})
+	if err != nil {
+		return err
+	}
+	protected, err := securestore.ProtectString(string(secretPayload))
+	if err != nil {
+		return err
+	}
+	stored := storedAccount{
+		Version: 1, Protection: "dpapi-current-user", Protected: protected,
+		ID: record.ID, Environment: record.Environment, Expiration: record.Expiration,
+		DomainID: record.DomainID, UserID: record.UserID, UserName: record.UserName,
+		PrincipalURN: record.PrincipalURN, Stats: record.Stats, Health: record.Health,
+		ModelHealth: record.ModelHealth, UpdatedAt: record.UpdatedAt,
+	}
+	return atomicWriteJSON(path, stored)
 }
 
 func (m *Manager) publicAccount(record AccountRecord) PublicAccount {
@@ -382,55 +459,175 @@ func numberValue(value any) float64 {
 
 func boolValueAny(value any) bool { v, _ := value.(bool); return v }
 
+func (m *Manager) MigrateSensitiveStorage() error {
+	if !securestore.Available() {
+		return nil
+	}
+	ids := map[string]bool{}
+	for _, dir := range []string{m.Settings.AccountsDir, filepath.Join(m.Settings.LegacyDataDir, "accounts")} {
+		if !m.Settings.MigrateLegacy && filepath.Clean(dir) != filepath.Clean(m.Settings.AccountsDir) {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				ids[strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))] = true
+			}
+		}
+	}
+	for id := range ids {
+		if _, err := m.LoadAccount(id); err != nil {
+			return fmt.Errorf("migrate account %s: %w", id, err)
+		}
+		if m.Settings.MigrateLegacy {
+			primary := filepath.Join(m.Settings.AccountsDir, id+".json")
+			legacy := filepath.Join(m.Settings.LegacyDataDir, "accounts", id+".json")
+			if _, err := os.Stat(primary); err == nil && filepath.Clean(primary) != filepath.Clean(legacy) {
+				_ = os.Remove(legacy)
+			}
+		}
+	}
+	legacyPending := filepath.Join(m.Settings.LegacyDataDir, "oauth_pending.json")
+	for _, path := range []string{m.Settings.PendingAuthFile, legacyPending} {
+		if !m.Settings.MigrateLegacy && filepath.Clean(path) != filepath.Clean(m.Settings.PendingAuthFile) {
+			continue
+		}
+		if _, err := os.Stat(path); err == nil {
+			if _, err := m.readPending(); err != nil {
+				return err
+			}
+			if m.Settings.MigrateLegacy && filepath.Clean(legacyPending) != filepath.Clean(m.Settings.PendingAuthFile) {
+				if _, err := os.Stat(m.Settings.PendingAuthFile); err == nil {
+					_ = os.Remove(legacyPending)
+				}
+			}
+			break
+		}
+	}
+	return nil
+}
+
 func (m *Manager) DeleteAccount(accountID string) (bool, error) {
 	if accountID == "" || strings.ContainsAny(accountID, `\\/:*?\"<>|`) {
 		return false, fmt.Errorf("invalid account id")
 	}
-	path := filepath.Join(m.Settings.AccountsDir, accountID+".json")
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+	deleted := false
+	for _, path := range m.accountPaths(accountID) {
+		if err := os.Remove(path); err == nil {
+			deleted = true
+		} else if !os.IsNotExist(err) {
+			return deleted, err
 		}
-		return false, err
 	}
-	if err := os.Remove(path); err != nil {
-		return false, err
-	}
-	return true, nil
+	return deleted, nil
 }
 
 func (m *Manager) LoadAccount(accountID string) (AccountRecord, error) {
 	if accountID == "" || strings.ContainsAny(accountID, `\\/:*?\"<>|`) {
 		return AccountRecord{}, fmt.Errorf("invalid account id")
 	}
-	payload, err := os.ReadFile(filepath.Join(m.Settings.AccountsDir, accountID+".json"))
-	if err != nil {
-		return AccountRecord{}, err
+	var lastErr error
+	for _, path := range m.accountPaths(accountID) {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			lastErr = err
+			continue
+		}
+		record, protected, err := decodeAccount(payload)
+		if err != nil {
+			return AccountRecord{}, err
+		}
+		if record.ID == "" {
+			record.ID = accountID
+		}
+		isPrimary := filepath.Clean(path) == filepath.Clean(filepath.Join(m.Settings.AccountsDir, accountID+".json"))
+		if securestore.Available() && (!protected || !isPrimary) {
+			if err := m.saveAccount(record); err != nil {
+				return AccountRecord{}, err
+			}
+			if !isPrimary {
+				_ = os.Remove(path)
+			}
+		}
+		return record, nil
+	}
+	if lastErr != nil {
+		return AccountRecord{}, lastErr
+	}
+	return AccountRecord{}, os.ErrNotExist
+}
+
+func (m *Manager) accountPaths(accountID string) []string {
+	paths := []string{filepath.Join(m.Settings.AccountsDir, accountID+".json")}
+	if m.Settings.MigrateLegacy {
+		legacy := filepath.Join(m.Settings.LegacyDataDir, "accounts", accountID+".json")
+		if filepath.Clean(legacy) != filepath.Clean(paths[0]) {
+			paths = append(paths, legacy)
+		}
+	}
+	return paths
+}
+
+func decodeAccount(payload []byte) (AccountRecord, bool, error) {
+	var stored storedAccount
+	if err := json.Unmarshal(payload, &stored); err == nil && stored.Protected != "" {
+		plain, err := securestore.UnprotectString(stored.Protected)
+		if err != nil {
+			return AccountRecord{}, true, err
+		}
+		var secrets accountSecrets
+		if err := json.Unmarshal([]byte(plain), &secrets); err != nil {
+			return AccountRecord{}, true, err
+		}
+		return AccountRecord{
+			ID: stored.ID, Environment: stored.Environment,
+			AccessKeyID: secrets.AccessKeyID, SecretAccessKey: secrets.SecretAccessKey,
+			SecurityToken: secrets.SecurityToken, Expiration: stored.Expiration,
+			RefreshToken: secrets.RefreshToken, DomainID: stored.DomainID,
+			UserID: stored.UserID, UserName: stored.UserName, PrincipalURN: stored.PrincipalURN,
+			AuthContext: secrets.AuthContext, Stats: stored.Stats, Health: stored.Health,
+			ModelHealth: stored.ModelHealth, UpdatedAt: stored.UpdatedAt,
+		}, true, nil
 	}
 	var record AccountRecord
 	if err := json.Unmarshal(payload, &record); err != nil {
-		return AccountRecord{}, err
+		return AccountRecord{}, false, err
 	}
-	if record.ID == "" {
-		record.ID = accountID
-	}
-	return record, nil
+	return record, false, nil
 }
 
 func (m *Manager) ListAccounts() ([]PublicAccount, error) {
-	entries, err := os.ReadDir(m.Settings.AccountsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []PublicAccount{}, nil
-		}
-		return nil, err
+	ids := map[string]bool{}
+	dirs := []string{m.Settings.AccountsDir}
+	if m.Settings.MigrateLegacy {
+		dirs = append(dirs, filepath.Join(m.Settings.LegacyDataDir, "accounts"))
 	}
-	accounts := make([]PublicAccount, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
-			continue
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
-		accountID := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				continue
+			}
+			ids[strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))] = true
+		}
+	}
+	accounts := make([]PublicAccount, 0, len(ids))
+	for accountID := range ids {
 		record, err := m.LoadAccount(accountID)
 		if err != nil {
 			continue
@@ -519,12 +716,16 @@ func needsRefresh(expiration string, skewSeconds int) bool {
 }
 
 func atomicWriteJSON(path string, value any) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil && dir != "." {
-		return err
-	}
 	payload, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
+		return err
+	}
+	return atomicWriteBytes(path, payload)
+}
+
+func atomicWriteBytes(path string, payload []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil && dir != "." {
 		return err
 	}
 	suffix, err := randomHex(8)

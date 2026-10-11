@@ -6,6 +6,7 @@ import (
 	"html"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/handsomedogx/codearts2api/internal/gateway"
 	"github.com/handsomedogx/codearts2api/internal/keepalive"
 	"github.com/handsomedogx/codearts2api/internal/observe"
+	"github.com/handsomedogx/codearts2api/internal/storage"
 	"github.com/handsomedogx/codearts2api/internal/subscription"
 )
 
@@ -36,21 +38,33 @@ type API struct {
 	conversations *conversation.Store
 }
 
-func New() http.Handler { return newAPI() }
+func New() http.Handler { return newAPI(config.Load()) }
 
-func NewRuntime() (http.Handler, func()) {
-	a := newAPI()
-	_, _ = a.gateway.Ensure()
+func NewRuntime() (http.Handler, func(), error) {
+	settings := config.Load()
+	if err := storage.MigrateNonSensitive(settings); err != nil {
+		return nil, nil, fmt.Errorf("migrate legacy data: %w", err)
+	}
+	a := newAPI(settings)
+	if err := a.auth.MigrateSensitiveStorage(); err != nil {
+		return nil, nil, fmt.Errorf("migrate protected credentials: %w", err)
+	}
+	if _, err := a.gateway.Ensure(); err != nil {
+		return nil, nil, fmt.Errorf("initialize gateway API key: %w", err)
+	}
 	service := keepalive.New(a.settings, a.auth, a.codearts)
 	service.Start()
-	return a, service.Stop
+	return a, service.Stop, nil
 }
 
-func newAPI() *API {
-	settings := config.Load()
+func newAPI(settings config.Settings) *API {
 	manager := auth.NewManager(settings)
 	client := codearts.New(settings, manager)
-	gatewayStore := gateway.New(settings.GatewaySettingsFile)
+	legacySettings := ""
+	if settings.MigrateLegacy {
+		legacySettings = filepath.Join(settings.LegacyDataDir, "settings.json")
+	}
+	gatewayStore := gateway.New(settings.GatewaySettingsFile, legacySettings)
 	a := &API{
 		mux:           http.NewServeMux(),
 		settings:      settings,

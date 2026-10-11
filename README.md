@@ -99,7 +99,7 @@ Default routing is `round_robin`. `random` and `weighted` can be selected in Set
 X-CodeArts-Account: <account-id>
 ```
 
-Account records are stored independently under `data/accounts/`, so refresh-token rotation for one account does not overwrite another account.
+Account records are stored independently under `%LOCALAPPDATA%\codearts2api\accounts\` by default, so refresh-token rotation for one account does not overwrite another account. On Windows, OAuth secrets inside those records are protected with current-user DPAPI before they are written to disk.
 
 ### Health-aware routing and failover
 
@@ -142,7 +142,7 @@ POST /api/v2/chat/completions
 
 ## Multi-turn conversations
 
-Every v2 request sends the full OpenAI message history upstream. A stable CodeArts `chat_id` is reused when the same conversation stays on the same account, which preserves prompt-cache affinity without relying on the legacy `parent_message_id` continuation chain. `codearts2api` stores only routing metadata plus SHA-256 hashes under `data/conversations/`; prompt and response text are not persisted there.
+Every v2 request sends the full OpenAI message history upstream. A stable CodeArts `chat_id` is reused when the same conversation stays on the same account, which preserves prompt-cache affinity without relying on the legacy `parent_message_id` continuation chain. `codearts2api` stores only routing metadata plus SHA-256 hashes under `%LOCALAPPDATA%\codearts2api\conversations\` by default; prompt and response text are not persisted there.
 
 You can explicitly reuse a conversation in either of these ways:
 
@@ -176,7 +176,7 @@ Click **Add Account** in the dashboard, then choose **China** or **International
 The dashboard then prepares the official CodeArts authorization URL but does **not** open it automatically. You can copy the URL or click **Open authorization page**. While you authorize, the modal stays in a waiting state and polls the account pool using the pending account ID. A successful callback:
 
 1. exchanges the authorization code for temporary Huawei credentials;
-2. creates a new account record in `data/accounts/`;
+2. creates a new DPAPI-protected account record under `%LOCALAPPDATA%\codearts2api\accounts\`;
 3. is detected by the dashboard automatically, including when the URL was copied and opened manually;
 4. changes the authorization wizard from waiting to completed.
 
@@ -204,7 +204,7 @@ Account APIs deliberately exclude AK, SK, Security Token, refresh token, PKCE ve
 
 ## Request logs
 
-Completed `/v1/chat/completions` calls are appended to `data/request_logs.jsonl`. The log is deliberately metadata-only: it stores request ID, result, selected model/account, source IP, User-Agent, latency, real upstream token usage, attempts, conversation ID and an error category. Prompt text, assistant output, Authorization headers, AK/SK, Security Token, refresh tokens and DPoP keys are never written.
+Completed `/v1/chat/completions` calls are appended to `%LOCALAPPDATA%\codearts2api\request_logs.jsonl` by default. The log is deliberately metadata-only: it stores request ID, result, selected model/account, source IP, User-Agent, latency, real upstream token usage, attempts, conversation ID and an error category. Prompt text, assistant output, Authorization headers, AK/SK, Security Token, refresh tokens and DPoP keys are never written.
 
 The Logs page supports free-text search across IP / UA / model / account / request ID, success/failure filtering, time ranges, row limits, archive size, success rate, HTTP success rate, average latency and current process-local in-progress requests. For proxied deployments the source IP uses the first `X-Forwarded-For` value; without that header it falls back to the TCP peer address.
 
@@ -216,7 +216,11 @@ CodeArts refresh tokens rotate. Each account is refreshed independently and rewr
 
 ## API access and configuration
 
-The normal setup does **not** require editing `.env`. On first start, `codearts2api` automatically generates a gateway API key and stores it in the Git-ignored `data/settings.json`. The same key is reused across restarts.
+The normal setup does **not** require editing `.env`. On Windows, runtime data is stored under `%LOCALAPPDATA%\codearts2api\` by default. On first start, `codearts2api` automatically generates a gateway API key and stores only a current-user DPAPI-protected form of that key in `settings.json`; the same key is reused across restarts.
+
+OAuth account secrets (AK/SK, Security Token, refresh token, PKCE verifier and private DPoP material) are also DPAPI-protected at rest. Public account metadata, health and usage statistics remain readable JSON. A protected credential file copied to another Windows user or machine is not expected to decrypt there.
+
+When upgrading from the earlier relative `data/` layout, the Go runtime automatically migrates routing/log/conversation data into LocalAppData. Existing plaintext `data/settings.json`, `data/oauth_pending.json` and `data/accounts/*.json` are read once, rewritten in protected form in LocalAppData, and the old plaintext sensitive files are removed after a successful migration.
 
 The local Dashboard exposes the full Base URL and API key under **Settings → External client access**. The management endpoints that can reveal or rotate the key accept only loopback connections; remote clients cannot read the key from the gateway.
 
@@ -238,6 +242,8 @@ CODEARTS2API_PORT=8000
 To serve another device on the LAN, intentionally bind `CODEARTS2API_HOST=0.0.0.0`, allow the port in the firewall, and use the machine's LAN address as the Base URL. Keep Dashboard management local to the server. For public deployments, put HTTPS/reverse-proxy access control in front of the gateway instead of exposing the development port directly.
 
 Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. When that override is present it replaces the generated key and Dashboard regeneration is disabled. The Go runtime loads `.env` automatically and supports the same CodeArts service endpoint, OAuth metadata, retry/cooldown, keepalive and storage-path environment variables as the Python reference implementation; these are advanced tuning knobs and are deliberately omitted from the normal `.env.example`.
+
+`CODEARTS2API_DATA_DIR` can override the default LocalAppData directory. More specific storage variables such as `CODEARTS_ACCOUNTS_DIR` and `CODEARTS_REQUEST_LOGS_FILE` still take precedence when explicitly configured. No environment variable is required for normal single-user Windows use.
 
 There is no manual AK/SK credential fallback: CodeArts credentials enter the pool only through the supported OAuth account flow.
 

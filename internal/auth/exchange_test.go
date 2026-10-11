@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -79,11 +78,14 @@ func TestExchangeCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stored AccountRecord
-	if err := json.Unmarshal(payload, &stored); err != nil {
+	if strings.Contains(string(payload), `"secret_access_key":"sk"`) || strings.Contains(string(payload), `"refresh_token":"refresh"`) || strings.Contains(string(payload), `"access_key_id":"ak"`) {
+		t.Fatalf("account secrets must not be stored in plaintext: %s", string(payload))
+	}
+	stored, err := manager.LoadAccount(session.AccountID)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if stored.AccessKeyID != "ak" || stored.SecretAccessKey != "sk" || stored.RefreshToken != "refresh" || stored.UserName != "user/test-user" {
-		t.Fatalf("unexpected stored account: %#v", stored)
+		t.Fatalf("unexpected decrypted account: %#v", stored)
 	}
 }

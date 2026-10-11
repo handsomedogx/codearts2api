@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,9 @@ func (p Profile) CallerIdentityURL() string { return p.STSBaseURL + "/v5/caller-
 func (p Profile) AuthorizeURL() string      { return p.PortalBaseURL + "/portal/authorize" }
 
 type Settings struct {
+	DataDir           string
+	LegacyDataDir     string
+	MigrateLegacy     bool
 	CNBaseURL         string
 	CNPortalBaseURL   string
 	CNSTSBaseURL      string
@@ -84,7 +88,13 @@ type Settings struct {
 
 func Load() Settings {
 	dotenvOnce.Do(func() { loadDotEnv(".env") })
+	dataDir := env("CODEARTS2API_DATA_DIR", defaultDataDir())
+	legacyDataDir := filepath.Clean("data")
+	migrateLegacy := storageOverridesUnset() && filepath.Clean(dataDir) != legacyDataDir
 	return Settings{
+		DataDir:                        dataDir,
+		LegacyDataDir:                  legacyDataDir,
+		MigrateLegacy:                  migrateLegacy,
 		CNBaseURL:                      env("CODEARTS_CN_BASE_URL", "https://snap-access.cn-north-4.myhuaweicloud.com"),
 		CNPortalBaseURL:                env("CODEARTS_CN_PORTAL_BASE_URL", "https://codearts.huaweicloud.com"),
 		CNSTSBaseURL:                   env("CODEARTS_CN_STS_BASE_URL", "https://sts.cn-north-4.myhuaweicloud.com"),
@@ -105,13 +115,13 @@ func Load() Settings {
 		Models:                         envCSV("CODEARTS_MODELS", "GLM-5.2"),
 		ModelCacheTTLSeconds:           envInt("CODEARTS_MODEL_CACHE_TTL_SECONDS", 300),
 		SubscriptionCacheTTLSeconds:    envInt("CODEARTS_SUBSCRIPTION_CACHE_TTL_SECONDS", 60),
-		UsageFile:                      env("CODEARTS_USAGE_FILE", "data/usage.jsonl"),
-		RequestLogsFile:                env("CODEARTS_REQUEST_LOGS_FILE", "data/request_logs.jsonl"),
-		GatewaySettingsFile:            env("CODEARTS2API_SETTINGS_FILE", "data/settings.json"),
-		PendingAuthFile:                env("CODEARTS_PENDING_AUTH_FILE", "data/oauth_pending.json"),
-		AccountsDir:                    env("CODEARTS_ACCOUNTS_DIR", "data/accounts"),
-		ConversationsDir:               env("CODEARTS_CONVERSATIONS_DIR", "data/conversations"),
-		RoutingFile:                    env("CODEARTS_ROUTING_FILE", "data/routing.json"),
+		UsageFile:                      env("CODEARTS_USAGE_FILE", filepath.Join(dataDir, "usage.jsonl")),
+		RequestLogsFile:                env("CODEARTS_REQUEST_LOGS_FILE", filepath.Join(dataDir, "request_logs.jsonl")),
+		GatewaySettingsFile:            env("CODEARTS2API_SETTINGS_FILE", filepath.Join(dataDir, "settings.json")),
+		PendingAuthFile:                env("CODEARTS_PENDING_AUTH_FILE", filepath.Join(dataDir, "oauth_pending.json")),
+		AccountsDir:                    env("CODEARTS_ACCOUNTS_DIR", filepath.Join(dataDir, "accounts")),
+		ConversationsDir:               env("CODEARTS_CONVERSATIONS_DIR", filepath.Join(dataDir, "conversations")),
+		RoutingFile:                    env("CODEARTS_ROUTING_FILE", filepath.Join(dataDir, "routing.json")),
 		RoutingStrategy:                env("CODEARTS_ROUTING_STRATEGY", "round_robin"),
 		AccountMaxConcurrency:          envInt("CODEARTS_ACCOUNT_MAX_CONCURRENCY", 4),
 		RoutingMaxAttempts:             envInt("CODEARTS_ROUTING_MAX_ATTEMPTS", 3),
@@ -168,6 +178,34 @@ func (s Settings) CallbackURL() string {
 		return v
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d/oauth/callback", s.Port)
+}
+
+func defaultDataDir() string {
+	if local := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); local != "" {
+		return filepath.Join(local, "codearts2api")
+	}
+	if configDir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(configDir) != "" {
+		return filepath.Join(configDir, "codearts2api")
+	}
+	return filepath.Clean("data")
+}
+
+func storageOverridesUnset() bool {
+	for _, name := range []string{
+		"CODEARTS2API_DATA_DIR",
+		"CODEARTS_USAGE_FILE",
+		"CODEARTS_REQUEST_LOGS_FILE",
+		"CODEARTS2API_SETTINGS_FILE",
+		"CODEARTS_PENDING_AUTH_FILE",
+		"CODEARTS_ACCOUNTS_DIR",
+		"CODEARTS_CONVERSATIONS_DIR",
+		"CODEARTS_ROUTING_FILE",
+	} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func loadDotEnv(path string) {
