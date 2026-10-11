@@ -4,6 +4,7 @@ import html
 import json
 import time
 import uuid
+from contextlib import asynccontextmanager
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,17 +17,28 @@ from fastapi.staticfiles import StaticFiles
 from app.codearts.auth import AuthManager, get_auth_manager
 from app.codearts.errors import CodeArtsUpstreamError
 from app.codearts.gateway import CodeArtsGateway
+from app.codearts.keepalive import KeepaliveService
 from app.codearts.model_catalog import get_model_catalog
 from app.codearts.subscription import get_subscription_catalog
 from app.codearts.usage import get_usage_store
 from app.config import Settings, get_settings, normalize_environment
 from app.models import ChatCompletionRequest
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 REQUEST_LOGS: deque[dict] = deque(maxlen=200)
 
-app = FastAPI(title="codearts2api", version=APP_VERSION)
+@asynccontextmanager
+async def app_lifespan(_: FastAPI):
+    service = KeepaliveService(get_settings(), get_auth_manager())
+    service.start()
+    try:
+        yield
+    finally:
+        await service.stop()
+
+
+app = FastAPI(title="codearts2api", version=APP_VERSION, lifespan=app_lifespan)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
@@ -189,6 +201,19 @@ async def ui_account_delete(account_id: str, auth: AuthManager = Depends(get_req
     if not auth.delete_account(account_id):
         raise HTTPException(status_code=404, detail="CodeArts account not found")
     return {"deleted": True, "account_id": account_id}
+
+
+@app.post("/api/ui/accounts/{account_id}/probe", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_account_probe(account_id: str, auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
+    try:
+        return await auth.probe_account(account_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/ui/accounts/probe", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_accounts_probe(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
+    return {"items": await auth.probe_accounts(due_only=False)}
 
 
 @app.get("/api/ui/routing", dependencies=[Depends(require_local_api_key)], include_in_schema=False)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import random
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -21,6 +24,26 @@ class CompletionResult:
     usage: dict[str, int]
 
 
+class RetryBudget:
+    def __init__(self, attempts: int, window_seconds: float) -> None:
+        self.limit = max(1, int(attempts))
+        self.window_seconds = max(0.1, float(window_seconds))
+        self.started = time.monotonic()
+        self.used = 0
+
+    def available(self) -> bool:
+        return self.used < self.limit and self.remaining_seconds() > 0
+
+    def consume(self) -> bool:
+        if not self.available():
+            return False
+        self.used += 1
+        return True
+
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.window_seconds - (time.monotonic() - self.started))
+
+
 class CodeArtsGateway:
     def __init__(self, settings: Settings, auth: AuthManager) -> None:
         self.settings = settings
@@ -34,18 +57,36 @@ class CodeArtsGateway:
     ) -> dict[str, Any]:
         return self.conversations.resolve(messages, conversation_id)
 
-    def _mark_success(self, account_id: str) -> None:
+    def _mark_success(self, account_id: str, model: str) -> None:
         if self.auth.pool.get(account_id):
             self.auth.pool.mark_success(account_id)
+            self.auth.pool.mark_model_success(account_id, model)
 
-    def _mark_failure(self, account_id: str, exc: CodeArtsUpstreamError) -> None:
-        if self.auth.pool.get(account_id):
+    def _mark_failure(self, account_id: str, model: str, exc: CodeArtsUpstreamError) -> None:
+        if not self.auth.pool.get(account_id):
+            return
+        # Client/request-shape errors must not poison account/model health.
+        if not exc.retryable and exc.status_code not in {401, 403}:
+            return
+        # Authentication/credential/network failures describe the account or transport.
+        # Model/rate/server failures are scoped to account+model so other models remain usable.
+        if exc.status_code in {401, 403} or exc.category in {
+            "auth", "credential_refresh", "credentials_unavailable", "network",
+        }:
             self.auth.pool.mark_failure(
                 account_id,
                 category=exc.category,
                 status_code=exc.status_code,
                 retry_after_seconds=exc.retry_after_seconds,
             )
+            return
+        self.auth.pool.mark_model_failure(
+            account_id,
+            model,
+            category=exc.category,
+            status_code=exc.status_code,
+            retry_after_seconds=exc.retry_after_seconds,
+        )
 
     @staticmethod
     def _usage(client: Any) -> dict[str, int]:
@@ -63,6 +104,28 @@ class CodeArtsGateway:
             and retry_index < max(0, self.settings.upstream_retries_per_account)
         )
 
+    def _retry_delay_seconds(self, retry_ordinal: int, exc: CodeArtsUpstreamError | None = None) -> float:
+        base_ms = max(0.0, float(self.settings.retry_backoff_base_ms))
+        cap_ms = max(base_ms, float(self.settings.retry_backoff_cap_ms))
+        delay_ms = min(cap_ms, base_ms * (2 ** max(0, retry_ordinal))) if base_ms else 0.0
+        jitter = min(1.0, max(0.0, float(self.settings.retry_backoff_jitter)))
+        if delay_ms and jitter:
+            delay_ms *= 1.0 + random.uniform(-jitter, jitter)
+        delay = max(0.0, delay_ms / 1000.0)
+        if exc is not None and exc.retry_after_seconds is not None:
+            delay = max(delay, max(0.0, float(exc.retry_after_seconds)))
+        return delay
+
+    async def _backoff(self, budget: RetryBudget, retry_ordinal: int, exc: CodeArtsUpstreamError) -> bool:
+        delay = self._retry_delay_seconds(retry_ordinal, exc)
+        if delay <= 0:
+            return budget.available()
+        remaining = budget.remaining_seconds()
+        if remaining <= delay:
+            return False
+        await asyncio.sleep(delay)
+        return budget.available()
+
     @staticmethod
     def _session_params(context: dict[str, Any], account_id: str) -> tuple[str, str | None, bool]:
         same_account = bool(context.get("account_id") == account_id and context.get("chat_id"))
@@ -79,14 +142,16 @@ class CodeArtsGateway:
         *,
         explicit_account_id: str | None,
         context: dict[str, Any],
+        model: str,
     ) -> list[tuple[dict[str, Any], Any]]:
         preferred = None if explicit_account_id else str(context.get("account_id") or "") or None
         candidates = await self.auth.account_candidates(
             account_id=explicit_account_id,
             preferred_account_id=preferred,
+            model=model,
         )
-        max_attempts = max(1, self.settings.routing_max_attempts)
-        return candidates[:max_attempts]
+        max_accounts = max(1, self.settings.routing_max_attempts)
+        return candidates[:max_accounts]
 
     def _complete_context(
         self,
@@ -108,6 +173,9 @@ class CodeArtsGateway:
             assistant_text=assistant_text,
         )
 
+    def _new_budget(self) -> RetryBudget:
+        return RetryBudget(self.settings.retry_budget_attempts, self.settings.retry_budget_seconds)
+
     async def complete(
         self,
         *,
@@ -117,22 +185,28 @@ class CodeArtsGateway:
         context: dict[str, Any],
         explicit_account_id: str | None = None,
     ) -> CompletionResult:
-        candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context)
+        candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context, model=model)
         if not candidates:
             raise CodeArtsUpstreamError(
-                "No usable CodeArts account is available. Add an account or wait for cooldown to expire.",
+                "No usable CodeArts account is available. Accounts may be cooling down or at concurrency capacity.",
                 category="no_account",
                 retryable=False,
             )
 
+        budget = self._new_budget()
         last_error: CodeArtsUpstreamError | None = None
-        total_attempts = 0
+        retry_ordinal = 0
         for account, credentials in candidates:
             account_id = str(account["id"])
             chat_id, parent_message_id, native_continuation = self._session_params(context, account_id)
             retry_index = 0
-            while True:
-                total_attempts += 1
+            while budget.available():
+                request_started_at = self.auth.pool.try_begin_request(account_id)
+                if request_started_at is None:
+                    break
+                if not budget.consume():
+                    self.auth.pool.release_request(account_id)
+                    break
                 client = CodeArtsClient(
                     self.settings,
                     auth_manager=self.auth,
@@ -140,9 +214,9 @@ class CodeArtsGateway:
                     account_id=account_id,
                     credentials=credentials,
                 )
-                request_started_at = self.auth.pool.begin_request(account_id)
                 attempt_success = False
                 error_category = ""
+                retry_same = False
                 try:
                     text = await client.chat(
                         messages=messages,
@@ -156,13 +230,11 @@ class CodeArtsGateway:
                 except CodeArtsUpstreamError as exc:
                     last_error = exc
                     error_category = exc.category
-                    if self._can_retry_same_account(exc, retry_index):
-                        retry_index += 1
-                        continue
-                    self._mark_failure(account_id, exc)
-                    if explicit_account_id or not exc.retryable:
-                        raise
-                    break
+                    retry_same = self._can_retry_same_account(exc, retry_index) and budget.available()
+                    if not retry_same:
+                        self._mark_failure(account_id, model, exc)
+                        if explicit_account_id or not exc.retryable:
+                            raise
                 finally:
                     usage = self._usage(client)
                     self.auth.pool.finish_request(
@@ -175,27 +247,40 @@ class CodeArtsGateway:
                         **usage,
                     )
 
-                self._mark_success(account_id)
-                self._complete_context(
-                    context,
-                    account=account,
-                    client=client,
-                    chat_id=chat_id,
-                    messages=messages,
-                    assistant_text=text,
-                )
-                return CompletionResult(
-                    text=text,
-                    conversation_id=str(context["id"]),
-                    account_id=account_id,
-                    environment=str(account["environment"]),
-                    attempts=total_attempts,
-                    usage=self._usage(client),
-                )
+                if attempt_success:
+                    self._mark_success(account_id, model)
+                    self._complete_context(
+                        context,
+                        account=account,
+                        client=client,
+                        chat_id=chat_id,
+                        messages=messages,
+                        assistant_text=text,
+                    )
+                    return CompletionResult(
+                        text=text,
+                        conversation_id=str(context["id"]),
+                        account_id=account_id,
+                        environment=str(account["environment"]),
+                        attempts=budget.used,
+                        usage=self._usage(client),
+                    )
+
+                if retry_same and last_error is not None:
+                    retry_index += 1
+                    if not await self._backoff(budget, retry_ordinal, last_error):
+                        break
+                    retry_ordinal += 1
+                    continue
+                if last_error is not None and last_error.retryable and budget.available():
+                    if not await self._backoff(budget, retry_ordinal, last_error):
+                        break
+                    retry_ordinal += 1
+                break
 
         if last_error:
             raise last_error
-        raise CodeArtsUpstreamError("No CodeArts account completed the request", category="no_account")
+        raise CodeArtsUpstreamError("No CodeArts account completed the request within retry budget", category="retry_budget")
 
     async def stream(
         self,
@@ -206,20 +291,28 @@ class CodeArtsGateway:
         context: dict[str, Any],
         explicit_account_id: str | None = None,
     ) -> AsyncIterator[str]:
-        candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context)
+        candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context, model=model)
         if not candidates:
             raise CodeArtsUpstreamError(
-                "No usable CodeArts account is available. Add an account or wait for cooldown to expire.",
+                "No usable CodeArts account is available. Accounts may be cooling down or at concurrency capacity.",
                 category="no_account",
                 retryable=False,
             )
 
+        budget = self._new_budget()
         last_error: CodeArtsUpstreamError | None = None
+        retry_ordinal = 0
         for account, credentials in candidates:
             account_id = str(account["id"])
             chat_id, parent_message_id, native_continuation = self._session_params(context, account_id)
             retry_index = 0
-            while True:
+            while budget.available():
+                request_started_at = self.auth.pool.try_begin_request(account_id)
+                if request_started_at is None:
+                    break
+                if not budget.consume():
+                    self.auth.pool.release_request(account_id)
+                    break
                 client = CodeArtsClient(
                     self.settings,
                     auth_manager=self.auth,
@@ -229,9 +322,9 @@ class CodeArtsGateway:
                 )
                 emitted = False
                 collected: list[str] = []
-                request_started_at = self.auth.pool.begin_request(account_id)
                 attempt_success = False
                 error_category = ""
+                retry_same = False
                 try:
                     async for delta in client.chat_stream(
                         messages=messages,
@@ -248,17 +341,14 @@ class CodeArtsGateway:
                 except CodeArtsUpstreamError as exc:
                     last_error = exc
                     error_category = exc.category
-                    # Once bytes have reached the caller, switching accounts could duplicate text.
                     if emitted:
-                        self._mark_failure(account_id, exc)
+                        self._mark_failure(account_id, model, exc)
                         raise
-                    if self._can_retry_same_account(exc, retry_index):
-                        retry_index += 1
-                        continue
-                    self._mark_failure(account_id, exc)
-                    if explicit_account_id or not exc.retryable:
-                        raise
-                    break
+                    retry_same = self._can_retry_same_account(exc, retry_index) and budget.available()
+                    if not retry_same:
+                        self._mark_failure(account_id, model, exc)
+                        if explicit_account_id or not exc.retryable:
+                            raise
                 finally:
                     usage = self._usage(client)
                     self.auth.pool.finish_request(
@@ -271,17 +361,30 @@ class CodeArtsGateway:
                         **usage,
                     )
 
-                self._mark_success(account_id)
-                self._complete_context(
-                    context,
-                    account=account,
-                    client=client,
-                    chat_id=chat_id,
-                    messages=messages,
-                    assistant_text="".join(collected),
-                )
-                return
+                if attempt_success:
+                    self._mark_success(account_id, model)
+                    self._complete_context(
+                        context,
+                        account=account,
+                        client=client,
+                        chat_id=chat_id,
+                        messages=messages,
+                        assistant_text="".join(collected),
+                    )
+                    return
+
+                if retry_same and last_error is not None:
+                    retry_index += 1
+                    if not await self._backoff(budget, retry_ordinal, last_error):
+                        break
+                    retry_ordinal += 1
+                    continue
+                if last_error is not None and last_error.retryable and budget.available():
+                    if not await self._backoff(budget, retry_ordinal, last_error):
+                        break
+                    retry_ordinal += 1
+                break
 
         if last_error:
             raise last_error
-        raise CodeArtsUpstreamError("No CodeArts account completed the request", category="no_account")
+        raise CodeArtsUpstreamError("No CodeArts account completed the request within retry budget", category="retry_budget")

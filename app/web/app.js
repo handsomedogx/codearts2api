@@ -98,6 +98,7 @@ function environmentLabel(environment) {
 }
 
 function routingLabel(strategy) {
+  if (strategy === "weighted") return tr("Weighted");
   return strategy === "random" ? tr("Random") : tr("Round Robin");
 }
 
@@ -187,6 +188,9 @@ function accountStatusPill(account) {
   if (!account.authenticated) {
     status.className = "pill neutral";
     status.textContent = tr("Not connected");
+  } else if (account.health?.needs_relogin) {
+    status.className = "pill danger";
+    status.textContent = tr("Relogin required");
   } else if (healthStatus === "cooldown") {
     status.className = "pill danger";
     status.textContent = tr("Cooldown");
@@ -266,7 +270,9 @@ function renderAccounts() {
 
     const inFlightCell = document.createElement("td");
     inFlightCell.className = "account-inflight-cell";
-    inFlightCell.textContent = formatCount(Number(account.stats?.concurrency ?? account.stats?.in_flight ?? 0));
+    const concurrency = Number(account.stats?.concurrency ?? account.stats?.in_flight ?? 0);
+    const maxConcurrency = Number(account.stats?.max_concurrency || 0);
+    inFlightCell.textContent = maxConcurrency > 0 ? `${formatCount(concurrency)} / ${formatCount(maxConcurrency)}` : formatCount(concurrency);
 
     const activityCell = document.createElement("td");
     const metrics = document.createElement("div");
@@ -306,6 +312,7 @@ function renderAccounts() {
     const actionCell = document.createElement("td");
     const actions = document.createElement("div");
     actions.className = "account-row-actions";
+    actions.appendChild(createAccountAction(tr("Probe"), "probe", account.id));
     if (account.refresh_available) actions.appendChild(createAccountAction(tr("Refresh"), "refresh", account.id));
     actions.appendChild(createAccountAction(tr("Remove"), "delete", account.id, "danger ghost"));
     actionCell.appendChild(actions);
@@ -753,6 +760,17 @@ async function refreshAccount(accountId) {
   }
 }
 
+async function probeAccount(accountId) {
+  try {
+    const status = await apiFetch(`/api/ui/accounts/${encodeURIComponent(accountId)}/probe`, { method: "POST" });
+    const ok = status.health?.probe_status === "ok";
+    toast(ok ? tr("Account probe succeeded") : tr("Account probe failed"), ok ? "success" : "error");
+    await loadAccounts();
+  } catch (error) {
+    toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `账号检测失败：${error.message}` : `Account probe failed: ${error.message}`), "error");
+  }
+}
+
 async function deleteAccount(accountId) {
   try {
     await apiFetch(`/api/ui/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" });
@@ -922,7 +940,8 @@ $("accountList").addEventListener("click", (event) => {
   if (!button) return;
   const accountId = button.dataset.accountId;
   const action = button.dataset.accountAction;
-  if (action === "refresh") refreshAccount(accountId);
+  if (action === "probe") probeAccount(accountId);
+  else if (action === "refresh") refreshAccount(accountId);
   else if (action === "delete") deleteAccount(accountId);
 });
 $("routingStrategy").addEventListener("change", updateRouting);

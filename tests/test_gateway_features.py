@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from app.codearts.auth import AuthManager
 from app.codearts.conversations import ConversationStore
@@ -18,6 +19,10 @@ def _settings(tmp_path) -> Settings:
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
         routing_max_attempts=3,
+        retry_backoff_base_ms=0,
+        retry_backoff_cap_ms=0,
+        retry_backoff_jitter=0,
+        keepalive_enabled=False,
         health_cooldown_base_seconds=30,
         health_cooldown_max_seconds=300,
     )
@@ -185,7 +190,9 @@ def test_gateway_fails_over_and_marks_health(monkeypatch, tmp_path) -> None:
     assert result.text == "ok"
     assert result.account_id == "b"
     assert result.attempts == 3
-    assert manager.account_status("a")["health"]["status"] == "cooldown"
+    status_a = manager.account_status("a")
+    assert status_a["health"]["status"] == "healthy"
+    assert status_a["model_health"]["codearts-auto"]["status"] == "cooldown"
     assert manager.account_status("b")["health"]["status"] == "healthy"
     assert manager.account_status("a")["stats"]["request_count"] == 2
     assert manager.account_status("b")["stats"]["request_count"] == 1
@@ -380,3 +387,150 @@ def test_official_free_package_quota_can_report_over_100_percent(tmp_path) -> No
     assert parsed["progress_percent"] == 100
     assert parsed["over_limit"] is True
     assert parsed["overage_tokens"] == 444124235
+
+
+
+def test_concurrency_limit_removes_full_account_until_release(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    settings = Settings(**{**settings.__dict__, "account_max_concurrency": 1})
+    manager = AuthManager(settings)
+    manager.pool.save(_record("a", ENV_CN), "a")
+    manager.pool.save(_record("b", ENV_CN), "b")
+
+    started = manager.pool.try_begin_request("a")
+    assert started is not None
+    assert manager.pool.try_begin_request("a") is None
+    assert manager.account_status("a")["stats"]["concurrency"] == 1
+    assert manager.account_status("a")["stats"]["available_concurrency"] == 0
+    assert [item["id"] for item in manager.pool.candidates(model="GLM-5.2")] == ["b"]
+
+    manager.pool.release_request("a")
+    assert manager.account_status("a")["stats"]["concurrency"] == 0
+    assert {item["id"] for item in manager.pool.candidates(model="GLM-5.2")} == {"a", "b"}
+
+
+def test_model_cooldown_only_blocks_that_model(tmp_path) -> None:
+    manager = AuthManager(_settings(tmp_path))
+    manager.pool.save(_record("a", ENV_CN), "a")
+    manager.pool.save(_record("b", ENV_CN), "b")
+
+    manager.pool.mark_model_failure("a", "GLM-5.2", category="rate_limit", status_code=429)
+    status = manager.account_status("a")
+    assert status["health"]["status"] == "healthy"
+    assert status["model_health"]["GLM-5.2"]["status"] == "cooldown"
+    assert [item["id"] for item in manager.pool.candidates(model="GLM-5.2")] == ["b"]
+    assert {item["id"] for item in manager.pool.candidates(model="GLM-5.1")} == {"a", "b"}
+
+    manager.pool.mark_model_success("a", "GLM-5.2")
+    assert manager.account_status("a")["model_health"]["GLM-5.2"]["status"] == "healthy"
+
+
+def test_retry_budget_caps_attempts_even_when_same_account_is_retryable(monkeypatch, tmp_path) -> None:
+    base = _settings(tmp_path)
+    settings = Settings(**{
+        **base.__dict__,
+        "retry_budget_attempts": 2,
+        "upstream_retries_per_account": 10,
+        "retry_backoff_base_ms": 0,
+        "retry_backoff_cap_ms": 0,
+    })
+    manager = AuthManager(settings)
+    manager.pool.save(_record("a", ENV_CN), "a")
+    manager.pool.save(_record("b", ENV_INTERNATIONAL), "b")
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, settings, **kwargs):
+            self.account_id = kwargs["account_id"]
+            self.environment = kwargs["environment"]
+            self.last_response_message_id = ""
+            self.last_chat_id = ""
+            self.last_usage = {}
+
+        async def chat(self, **kwargs):
+            calls.append(self.account_id)
+            raise CodeArtsUpstreamError("busy", status_code=503, category="server", retryable=True)
+
+    monkeypatch.setattr("app.codearts.gateway.CodeArtsClient", FakeClient)
+    gateway = CodeArtsGateway(settings, manager)
+    messages = [{"role": "user", "content": "hello"}]
+    context = gateway.resolve_conversation(messages)
+    try:
+        asyncio.run(gateway.complete(messages=messages, model="GLM-5.2", user=None, context=context))
+    except CodeArtsUpstreamError:
+        pass
+    else:
+        raise AssertionError("expected upstream failure")
+    assert calls == ["a", "a"]
+
+
+def test_retry_backoff_uses_exponential_delay_without_jitter(monkeypatch, tmp_path) -> None:
+    base = _settings(tmp_path)
+    settings = Settings(**{
+        **base.__dict__,
+        "retry_backoff_base_ms": 500,
+        "retry_backoff_cap_ms": 8000,
+        "retry_backoff_jitter": 0,
+    })
+    gateway = CodeArtsGateway(settings, AuthManager(settings))
+    exc = CodeArtsUpstreamError("busy", status_code=503, category="server", retryable=True)
+    assert gateway._retry_delay_seconds(0, exc) == 0.5
+    assert gateway._retry_delay_seconds(1, exc) == 1.0
+    assert gateway._retry_delay_seconds(4, exc) == 8.0
+    assert gateway._retry_delay_seconds(8, exc) == 8.0
+
+
+def test_keepalive_probe_distinguishes_auth_failure_from_network(monkeypatch, tmp_path) -> None:
+    from app.codearts.client import CodeArtsClient
+
+    settings = _settings(tmp_path)
+    manager = AuthManager(settings)
+    manager.pool.save(_record("auth-dead", ENV_CN), "auth-dead")
+    manager.pool.save(_record("network", ENV_CN), "network")
+
+    async def fake_get_json(self, url, **kwargs):
+        if self.account_id == "auth-dead":
+            raise CodeArtsUpstreamError("unauthorized", status_code=401, category="auth", retryable=True)
+        raise CodeArtsUpstreamError("reset", category="network", retryable=True)
+
+    monkeypatch.setattr(CodeArtsClient, "get_json", fake_get_json)
+    auth_dead = asyncio.run(manager.probe_account("auth-dead"))
+    network = asyncio.run(manager.probe_account("network"))
+
+    assert auth_dead["health"]["needs_relogin"] is True
+    assert manager.pool.is_usable(manager.pool.get("auth-dead")) is False
+    assert network["health"]["needs_relogin"] is False
+    assert network["health"]["probe_error_category"] == "network"
+    assert manager.pool.is_usable(manager.pool.get("network")) is True
+
+
+def test_weighted_router_prefers_healthier_less_loaded_account(monkeypatch, tmp_path) -> None:
+    base = _settings(tmp_path)
+    settings = Settings(**{**base.__dict__, "routing_strategy": "weighted", "account_max_concurrency": 4})
+    manager = AuthManager(settings)
+    a = _record("a", ENV_CN)
+    a["stats"] = {
+        "request_count": 10,
+        "success_count": 5,
+        "failure_count": 5,
+        "total_latency_ms": 200000,
+        "last_request_at": datetime.now(timezone.utc).isoformat(),
+    }
+    b = _record("b", ENV_CN)
+    manager.pool.save(a, "a")
+    manager.pool.save(b, "b")
+    assert manager.pool.try_begin_request("a") is not None
+
+    weights_seen: list[list[float]] = []
+
+    def choose_max(population, *, weights, k):
+        weights_seen.append(list(weights))
+        index = max(range(len(population)), key=lambda i: weights[i])
+        return [population[index]]
+
+    monkeypatch.setattr("app.codearts.account_pool.random.choices", choose_max)
+    candidates = manager.pool.candidates(model="GLM-5.2")
+    manager.pool.release_request("a")
+    assert candidates[0]["id"] == "b"
+    assert weights_seen
+    assert manager.pool._routing_weight(b, model="GLM-5.2") > manager.pool._routing_weight(a, model="GLM-5.2")

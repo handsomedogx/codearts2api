@@ -264,6 +264,7 @@ class AuthManager:
             # Preserve operational state across OAuth refreshes.
             "stats": dict(previous.get("stats") or {}),
             "health": dict(previous.get("health") or {}),
+            "model_health": dict(previous.get("model_health") or {}),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -380,12 +381,14 @@ class AuthManager:
         account_id: str | None = None,
         preferred_account_id: str | None = None,
         exclude_ids: set[str] | None = None,
+        model: str = "",
     ) -> list[tuple[dict[str, Any], ActiveCredentials]]:
         candidates: list[tuple[dict[str, Any], ActiveCredentials]] = []
         records = self.pool.candidates(
             account_id=account_id,
             preferred_account_id=preferred_account_id,
             exclude_ids=exclude_ids,
+            model=model,
         )
         for record in records:
             selected_id = str(record.get("id") or "")
@@ -427,9 +430,141 @@ class AuthManager:
                 }, credentials))
         return candidates
 
-    async def choose_account(self, account_id: str | None = None) -> tuple[dict[str, Any], ActiveCredentials] | None:
-        candidates = await self.account_candidates(account_id=account_id)
+    async def choose_account(self, account_id: str | None = None, *, model: str = "") -> tuple[dict[str, Any], ActiveCredentials] | None:
+        candidates = await self.account_candidates(account_id=account_id, model=model)
         return candidates[0] if candidates else None
+
+    async def probe_account(self, account_id: str) -> dict[str, Any]:
+        record = self.pool.get(account_id)
+        if not record:
+            raise RuntimeError("CodeArts account not found")
+        environment = normalize_environment(str(record.get("environment") or "cn"))
+        access_key_id = str(record.get("access_key_id") or "")
+        secret_access_key = str(record.get("secret_access_key") or "")
+        if not access_key_id or not secret_access_key:
+            self.pool.mark_failure(account_id, category="auth_probe", status_code=401)
+            self.pool.record_probe(account_id, ok=False, category="credentials_unavailable", status_code=401, needs_relogin=True)
+            return self.account_status(account_id)
+
+        from app.codearts.client import CodeArtsClient
+        from app.codearts.errors import CodeArtsUpstreamError
+
+        def credentials_from(current: dict[str, Any]) -> ActiveCredentials:
+            return ActiveCredentials(
+                access_key_id=str(current.get("access_key_id") or ""),
+                secret_access_key=str(current.get("secret_access_key") or ""),
+                security_token=str(current.get("security_token") or ""),
+                domain_id=str(current.get("domain_id") or ""),
+                expires_at=str(current.get("expiration") or ""),
+                source="account_pool",
+            )
+
+        async def lightweight_probe(current: dict[str, Any]) -> None:
+            profile = self.settings.profile(environment)
+            last_error: Exception | None = None
+            for attempt in range(2):
+                client = CodeArtsClient(
+                    self.settings,
+                    auth_manager=self,
+                    environment=environment,
+                    account_id=account_id,
+                    credentials=credentials_from(current),
+                )
+                try:
+                    await client.get_json(f"{profile.base_url}/v1/model/builtin", agent_type="PromptCenter")
+                    return
+                except CodeArtsUpstreamError as exc:
+                    last_error = exc
+                    if exc.category != "network" or attempt:
+                        raise
+                    await asyncio.sleep(0.25)
+            if last_error:
+                raise last_error
+
+        try:
+            await lightweight_probe(record)
+        except CodeArtsUpstreamError as exc:
+            # An auth rejection may simply mean the temporary AK/SK expired. Refresh once,
+            # then retry the lightweight probe before declaring that login is dead.
+            if (exc.status_code in {401, 403} or exc.category == "auth") and record.get("refresh_token") and record.get("auth_context"):
+                try:
+                    await self.refresh_account(account_id, force=True)
+                    self.pool.record_refresh_probe(account_id, ok=True)
+                    refreshed = self.pool.get(account_id) or record
+                    await lightweight_probe(refreshed)
+                except Exception as refresh_exc:
+                    text = str(refresh_exc).lower()
+                    terminal = any(marker in text for marker in (
+                        "invalid_grant", "offline user session not found", "refresh token failed",
+                    ))
+                    category = "auth_probe" if terminal else ("network" if isinstance(refresh_exc, httpx.RequestError) else "refresh_error")
+                    self.pool.record_refresh_probe(account_id, ok=False, category=category)
+                    if terminal:
+                        self.pool.mark_failure(account_id, category="auth_probe", status_code=401)
+                    self.pool.record_probe(account_id, ok=False, category=category, status_code=401 if terminal else None, needs_relogin=terminal)
+                    return self.account_status(account_id)
+            else:
+                needs_relogin = exc.status_code in {401, 403} or exc.category == "auth"
+                if needs_relogin:
+                    self.pool.mark_failure(account_id, category="auth_probe", status_code=exc.status_code)
+                self.pool.record_probe(
+                    account_id,
+                    ok=False,
+                    category=exc.category or "probe",
+                    status_code=exc.status_code,
+                    needs_relogin=needs_relogin,
+                )
+                return self.account_status(account_id)
+        except httpx.RequestError:
+            self.pool.record_probe(account_id, ok=False, category="network", needs_relogin=False)
+            return self.account_status(account_id)
+        except Exception:
+            self.pool.record_probe(account_id, ok=False, category="probe_error", needs_relogin=False)
+            return self.account_status(account_id)
+
+        # The account is demonstrably usable. Record that fact before a best-effort refresh,
+        # so STS/network jitter cannot turn a healthy account into a false failed probe.
+        self.pool.record_probe(account_id, ok=True)
+        current = self.pool.get(account_id) or record
+        if current.get("refresh_token") and current.get("auth_context"):
+            try:
+                await self.refresh_account(account_id, force=True)
+            except httpx.RequestError:
+                self.pool.record_refresh_probe(account_id, ok=False, category="network")
+            except Exception as exc:
+                text = str(exc).lower()
+                terminal = any(marker in text for marker in (
+                    "invalid_grant", "offline user session not found", "refresh token failed",
+                ))
+                self.pool.record_refresh_probe(account_id, ok=False, category="auth_probe" if terminal else "refresh_error")
+            else:
+                self.pool.record_refresh_probe(account_id, ok=True)
+        return self.account_status(account_id)
+
+    async def probe_accounts(self, *, due_only: bool = False) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        results: list[dict[str, Any]] = []
+        for index, record in enumerate(self.pool.list_records()):
+            account_id = str(record.get("id") or "")
+            if not account_id:
+                continue
+            if due_only:
+                health = record.get("health") if isinstance(record.get("health"), dict) else {}
+                last_probe = str(health.get("last_probe_at") or "")
+                # Successful probes use the long keepalive interval. A transient failed
+                # probe is retried on the next scheduler poll instead of being suppressed
+                # for a full day.
+                if last_probe and str(health.get("probe_status") or "") == "ok":
+                    try:
+                        parsed = datetime.fromisoformat(last_probe.replace("Z", "+00:00"))
+                    except ValueError:
+                        parsed = None
+                    if parsed is not None and (now - parsed.astimezone(timezone.utc)).total_seconds() < max(60, self.settings.keepalive_interval_seconds):
+                        continue
+            if index and self.settings.keepalive_account_gap_seconds > 0:
+                await asyncio.sleep(self.settings.keepalive_account_gap_seconds)
+            results.append(await self.probe_account(account_id))
+        return results
 
     def delete_account(self, account_id: str) -> bool:
         return self.pool.delete(account_id)

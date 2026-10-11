@@ -6,8 +6,9 @@ A local OpenAI-compatible gateway for Huawei CodeArts Agent APIs. It uses the us
 
 - local dark Web UI at `http://127.0.0.1:8000/`
 - multi-account pool containing both China and International CodeArts accounts
-- automatic account routing (`round_robin` or `random`)
-- health-aware failover with cooldown/backoff for recoverable account failures
+- automatic account routing (`round_robin`, `random`, or health-aware `weighted`)
+- health-aware failover with per-account concurrency leases, account+model cooldown, retry budgets, and jittered backoff
+- background account keepalive / health probes with explicit relogin detection
 - optional explicit account selection with `X-CodeArts-Account`
 - `GET /health`
 - live `GET /v1/models` discovery from CodeArts builtin and third-party model APIs
@@ -56,7 +57,7 @@ Account Pool
 
 A request is routed to an account first. That account's `environment` then determines the correct upstream endpoint and signing context.
 
-Default routing is `round_robin`. `random` can be selected in Settings. To force one request through a specific account, send:
+Default routing is `round_robin`. `random` and `weighted` can be selected in Settings. `weighted` uses observed health, current concurrency, failure rate, latency, and idle time; CodeArts package usage is intentionally not used as a routing weight because the official 5M package amount is not a hard stop. To force one request through a specific account, send:
 
 ```text
 X-CodeArts-Account: <account-id>
@@ -66,11 +67,21 @@ Account records are stored independently under `data/accounts/`, so refresh-toke
 
 ### Health-aware routing and failover
 
-Transient network, timeout, and upstream `5xx` failures get one quick retry on the same account by default. If they still fail, or if the account returns `429` / `401/403`, the account is marked unhealthy and put into a temporary cooldown. If another usable account is available, the gateway retries the request with the next account automatically. Cooldown uses exponential backoff and the account's public health state is visible in the dashboard; credentials and response bodies are never exposed in that metadata.
+Each account has a process-local concurrency lease. `CODEARTS_ACCOUNT_MAX_CONCURRENCY` defaults to `4`; once an account reaches the limit it is temporarily removed from routing until a lease is released. This is a hard admission limit, not only a dashboard counter.
+
+Transient network, timeout, and upstream `5xx` failures may retry the same account first. Every client request also has a global retry budget (`CODEARTS_RETRY_BUDGET_ATTEMPTS` + `CODEARTS_RETRY_BUDGET_SECONDS`) so a large pool cannot be swept indefinitely. New attempts use exponential backoff (`base * 2^n`, capped) with configurable jitter.
+
+Health is scoped at two levels. Authentication, credential, and transport failures can cool down the whole account. Model/rate/server failures are stored under `account + model`, so `GLM-5.2` can cool down on one account while `GLM-5.1` remains eligible on the same account. The dashboard exposes the safe public health metadata; credentials and response bodies are never included.
 
 For streaming requests, failover is allowed only before the first response delta has been sent to the caller. Once output has started, the gateway keeps the same account so a retry cannot duplicate already streamed text.
 
 `X-CodeArts-Account` pins a request to one account and therefore intentionally disables cross-account failover for that request.
+
+### Keepalive and active account probes
+
+A lightweight keepalive service runs in the FastAPI lifespan when `CODEARTS_KEEPALIVE_ENABLED=true`. It periodically probes accounts that have not been checked within `CODEARTS_KEEPALIVE_INTERVAL_SECONDS` (default 24 hours). For OAuth accounts it refreshes the rotating token and then calls the lightweight CodeArts builtin-model endpoint to verify the upstream session without creating a chat or consuming model tokens.
+
+The probe distinguishes terminal authentication failures (for example `401/403` or `invalid_grant`) from transient network/probe errors. Terminal failures set `needs_relogin`; transient network errors are recorded without disabling an otherwise healthy account. Accounts are probed serially with `CODEARTS_KEEPALIVE_ACCOUNT_GAP_SECONDS` between accounts.
 
 ## Live model discovery
 
@@ -136,6 +147,8 @@ GET    /auth/login-url?environment=cn
 GET    /auth/login-url?environment=international
 GET    /api/ui/accounts
 POST   /api/ui/accounts/{account_id}/refresh
+POST   /api/ui/accounts/{account_id}/probe
+POST   /api/ui/accounts/probe
 DELETE /api/ui/accounts/{account_id}
 GET    /api/ui/routing
 POST   /api/ui/routing

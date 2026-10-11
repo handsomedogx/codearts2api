@@ -17,6 +17,13 @@ def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def normalize_environment(value: str | None) -> str:
     normalized = (value or "").strip().lower()
     aliases = {
@@ -96,8 +103,20 @@ class Settings:
     routing_file: str = os.getenv("CODEARTS_ROUTING_FILE", "data/routing.json")
     routing_strategy: str = os.getenv("CODEARTS_ROUTING_STRATEGY", "round_robin")
     routing_max_attempts: int = int(os.getenv("CODEARTS_ROUTING_MAX_ATTEMPTS", "3"))
+    account_max_concurrency: int = int(os.getenv("CODEARTS_ACCOUNT_MAX_CONCURRENCY", "4"))
     upstream_retries_per_account: int = int(os.getenv("CODEARTS_UPSTREAM_RETRIES_PER_ACCOUNT", "1"))
+    retry_budget_attempts: int = int(os.getenv("CODEARTS_RETRY_BUDGET_ATTEMPTS", "4"))
+    retry_budget_seconds: float = float(os.getenv("CODEARTS_RETRY_BUDGET_SECONDS", "15"))
+    retry_backoff_base_ms: float = float(os.getenv("CODEARTS_RETRY_BACKOFF_BASE_MS", "500"))
+    retry_backoff_cap_ms: float = float(os.getenv("CODEARTS_RETRY_BACKOFF_CAP_MS", "8000"))
+    retry_backoff_jitter: float = float(os.getenv("CODEARTS_RETRY_BACKOFF_JITTER", "0.25"))
     health_cooldown_base_seconds: int = int(os.getenv("CODEARTS_HEALTH_COOLDOWN_BASE_SECONDS", "15"))
+    model_health_cooldown_base_seconds: int = int(os.getenv("CODEARTS_MODEL_HEALTH_COOLDOWN_BASE_SECONDS", "15"))
+    model_health_cooldown_max_seconds: int = int(os.getenv("CODEARTS_MODEL_HEALTH_COOLDOWN_MAX_SECONDS", "300"))
+    keepalive_enabled: bool = _env_bool("CODEARTS_KEEPALIVE_ENABLED", True)
+    keepalive_interval_seconds: int = int(os.getenv("CODEARTS_KEEPALIVE_INTERVAL_SECONDS", "86400"))
+    keepalive_poll_seconds: int = int(os.getenv("CODEARTS_KEEPALIVE_POLL_SECONDS", "300"))
+    keepalive_account_gap_seconds: float = float(os.getenv("CODEARTS_KEEPALIVE_ACCOUNT_GAP_SECONDS", "0.8"))
     health_cooldown_max_seconds: int = int(os.getenv("CODEARTS_HEALTH_COOLDOWN_MAX_SECONDS", "300"))
     health_auth_cooldown_seconds: int = int(os.getenv("CODEARTS_HEALTH_AUTH_COOLDOWN_SECONDS", "120"))
     health_rate_limit_cooldown_seconds: int = int(os.getenv("CODEARTS_HEALTH_RATE_LIMIT_COOLDOWN_SECONDS", "60"))

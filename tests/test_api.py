@@ -156,7 +156,7 @@ def test_web_ui_and_ui_meta_exist() -> None:
     assert meta.status_code == 200
     body = meta.json()
     assert body["name"] == "codearts2api"
-    assert body["version"] == "0.5.0"
+    assert body["version"] == "0.6.0"
     assert body["api_base"] == "/v1"
     assert "api_key_enabled" in body
 
@@ -280,6 +280,7 @@ def test_web_ui_login_chooser_and_popup_flow_assets() -> None:
     assert 'id="oauthWaitCard"' in root.text
     assert 'id="accountList"' in root.text
     assert 'id="routingStrategy"' in root.text
+    assert '<option value="weighted">Weighted</option>' in root.text
     assert 'China mainland CodeArts service' not in root.text
     assert 'International CodeArts service' not in root.text
     assert 'login-site-arrow' not in root.text
@@ -299,6 +300,9 @@ def test_web_ui_login_chooser_and_popup_flow_assets() -> None:
     assert 'window.addEventListener("message"' in app_js
     assert 'window.addEventListener("storage"' in app_js
     assert '/api/ui/accounts' in app_js
+    assert '/probe' in app_js
+    assert 'strategy === "weighted"' in app_js
+    assert 'max_concurrency' in app_js
     assert 'popup.location.replace(body.authorize_url)' not in app_js
     assert 'location.href = body.authorize_url' not in app_js
     assert 'Use for API' not in app_js

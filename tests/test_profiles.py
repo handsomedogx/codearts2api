@@ -197,6 +197,10 @@ def test_ui_exposes_pool_and_routing_without_global_environment(tmp_path) -> Non
         routing = client.post("/api/ui/routing", json={"strategy": "random"})
         assert routing.status_code == 200
         assert routing.json()["strategy"] == "random"
+        weighted = client.post("/api/ui/routing", json={"strategy": "weighted"})
+        assert weighted.status_code == 200
+        assert weighted.json()["strategy"] == "weighted"
+        assert weighted.json()["max_concurrency"] == settings.account_max_concurrency
 
         login = client.get("/auth/login-url?environment=international").json()
         assert login["environment"] == ENV_INTERNATIONAL
