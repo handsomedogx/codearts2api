@@ -129,7 +129,7 @@ func (s *Store) writeKey(key string) error {
 		if err != nil {
 			return err
 		}
-		payload["protection"] = "dpapi-current-user"
+		payload["protection"] = securestore.ProtectionName()
 		payload["api_key_protected"] = protected
 	} else {
 		payload["api_key"] = key

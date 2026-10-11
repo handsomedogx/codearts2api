@@ -9,9 +9,9 @@ import (
 	"github.com/handsomedogx/codearts2api/internal/securestore"
 )
 
-func TestPlaintextAPIKeyMigratesToDPAPI(t *testing.T) {
+func TestPlaintextAPIKeyMigratesToProtectedStorage(t *testing.T) {
 	if !securestore.Available() {
-		t.Skip("DPAPI is only available on Windows")
+		t.Skip("platform secure storage is unavailable")
 	}
 	root := t.TempDir()
 	legacy := filepath.Join(root, "legacy", "settings.json")

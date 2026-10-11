@@ -220,7 +220,13 @@ The normal setup does **not** require editing `.env`. On Windows, runtime data i
 
 OAuth account secrets (AK/SK, Security Token, refresh token, PKCE verifier and private DPoP material) are also DPAPI-protected at rest. Public account metadata, health and usage statistics remain readable JSON. A protected credential file copied to another Windows user or machine is not expected to decrypt there.
 
-When upgrading from the earlier relative `data/` layout, the Go runtime automatically migrates routing/log/conversation data into LocalAppData. Existing plaintext `data/settings.json`, `data/oauth_pending.json` and `data/accounts/*.json` are read once, rewritten in protected form in LocalAppData, and the old plaintext sensitive files are removed after a successful migration.
+On Linux, runtime data uses the normal user configuration directory (typically `~/.config/codearts2api/`). Sensitive values are protected with AES-256-GCM. The encryption key is kept separately: by default `codearts2api` creates `~/.local/state/codearts2api/master.key` with directory mode `0700` and file mode `0600`. Copying only the runtime data directory is therefore not enough to decrypt the stored credentials.
+
+Linux deployments can supply their own 32-byte master key with `CODEARTS2API_MASTER_KEY` (base64 or hex), or choose a separate key file with `CODEARTS2API_MASTER_KEY_FILE`. For a VPS/systemd deployment, pointing `CODEARTS2API_MASTER_KEY_FILE` at a service-owned `0600` file outside the runtime data directory is recommended. If neither variable is configured, the per-user master key is generated automatically.
+
+Keep that Linux master key if you want to preserve existing login state across rebuilds or migrations. If AES-protected credentials already exist but the configured/default master key file is missing, startup fails with an explicit recovery error instead of silently generating a replacement key. Restoring the original key recovers the credentials; otherwise the CodeArts accounts must be authorized again.
+
+When upgrading from the earlier relative `data/` layout, the Go runtime automatically migrates routing/log/conversation data into the platform runtime-data directory. Existing plaintext `data/settings.json`, `data/oauth_pending.json` and `data/accounts/*.json` are read once, rewritten using the platform protection scheme (DPAPI on Windows, AES-256-GCM on Linux), and the old plaintext sensitive files are removed after a successful migration.
 
 The local Dashboard exposes the full Base URL and API key under **Settings → External client access**. The management endpoints that can reveal or rotate the key accept only loopback connections; remote clients cannot read the key from the gateway.
 
@@ -243,7 +249,7 @@ To serve another device on the LAN, intentionally bind `CODEARTS2API_HOST=0.0.0.
 
 Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. When that override is present it replaces the generated key and Dashboard regeneration is disabled. The Go runtime loads `.env` automatically and supports the same CodeArts service endpoint, OAuth metadata, retry/cooldown, keepalive and storage-path environment variables as the Python reference implementation; these are advanced tuning knobs and are deliberately omitted from the normal `.env.example`.
 
-`CODEARTS2API_DATA_DIR` can override the default LocalAppData directory. More specific storage variables such as `CODEARTS_ACCOUNTS_DIR` and `CODEARTS_REQUEST_LOGS_FILE` still take precedence when explicitly configured. No environment variable is required for normal single-user Windows use.
+`CODEARTS2API_DATA_DIR` can override the platform default runtime-data directory. More specific storage variables such as `CODEARTS_ACCOUNTS_DIR` and `CODEARTS_REQUEST_LOGS_FILE` still take precedence when explicitly configured. No environment variable is required for normal single-user Windows or Linux use.
 
 There is no manual AK/SK credential fallback: CodeArts credentials enter the pool only through the supported OAuth account flow.
 

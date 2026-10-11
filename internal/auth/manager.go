@@ -380,7 +380,7 @@ func (m *Manager) saveAccount(record AccountRecord) error {
 		return err
 	}
 	stored := storedAccount{
-		Version: 1, Protection: "dpapi-current-user", Protected: protected,
+		Version: 1, Protection: securestore.ProtectionName(), Protected: protected,
 		ID: record.ID, Environment: record.Environment, Expiration: record.Expiration,
 		DomainID: record.DomainID, UserID: record.UserID, UserName: record.UserName,
 		PrincipalURN: record.PrincipalURN, Stats: record.Stats, Health: record.Health,

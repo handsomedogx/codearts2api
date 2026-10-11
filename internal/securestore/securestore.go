@@ -7,9 +7,13 @@ import (
 	"strings"
 )
 
-const Prefix = "dpapi:v1:"
-
 func Available() bool { return available() }
+
+func Prefix() string { return platformPrefix() }
+
+func ProtectionName() string { return platformProtectionName() }
+
+func PrepareRuntime(paths ...string) error { return prepareRuntime(paths...) }
 
 func ProtectString(value string) (string, error) {
 	if value == "" {
@@ -19,17 +23,17 @@ func ProtectString(value string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return Prefix + base64.RawStdEncoding.EncodeToString(protected), nil
+	return Prefix() + base64.RawStdEncoding.EncodeToString(protected), nil
 }
 
 func UnprotectString(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
-	if !strings.HasPrefix(value, Prefix) {
-		return "", fmt.Errorf("value is not DPAPI protected")
+	if !strings.HasPrefix(value, Prefix()) {
+		return "", fmt.Errorf("value is not %s protected", ProtectionName())
 	}
-	payload, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, Prefix))
+	payload, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, Prefix()))
 	if err != nil {
 		return "", fmt.Errorf("decode protected value: %w", err)
 	}
@@ -40,7 +44,7 @@ func UnprotectString(value string) (string, error) {
 	return string(plain), nil
 }
 
-func IsProtected(value string) bool { return strings.HasPrefix(value, Prefix) }
+func IsProtected(value string) bool { return strings.HasPrefix(value, Prefix()) }
 
 type Envelope struct {
 	Version    int    `json:"version"`
@@ -60,7 +64,7 @@ func MarshalProtectedJSON(value any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return json.MarshalIndent(Envelope{Version: 1, Protection: "dpapi-current-user", Protected: protected}, "", "  ")
+	return json.MarshalIndent(Envelope{Version: 1, Protection: ProtectionName(), Protected: protected}, "", "  ")
 }
 
 func UnmarshalProtectedJSON(raw []byte, target any) (bool, error) {

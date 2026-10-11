@@ -1,10 +1,13 @@
 package securestore
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
-func TestDPAPIRoundTrip(t *testing.T) {
+func TestPlatformProtectionRoundTrip(t *testing.T) {
 	if !Available() {
-		t.Skip("DPAPI is only available on Windows")
+		t.Skip("platform secure storage is unavailable")
 	}
 	plain := "sk-ca-test-secret-value"
 	protected, err := ProtectString(plain)
@@ -25,7 +28,7 @@ func TestDPAPIRoundTrip(t *testing.T) {
 
 func TestProtectedJSONRoundTrip(t *testing.T) {
 	if !Available() {
-		t.Skip("DPAPI is only available on Windows")
+		t.Skip("platform secure storage is unavailable")
 	}
 	input := map[string]any{"refresh_token": "refresh-secret", "count": float64(1)}
 	raw, err := MarshalProtectedJSON(input)
@@ -42,6 +45,30 @@ func TestProtectedJSONRoundTrip(t *testing.T) {
 	}
 	if !protected || output["refresh_token"] != "refresh-secret" {
 		t.Fatalf("unexpected output: %#v", output)
+	}
+}
+
+func TestAESGCMRoundTripAndTamperDetection(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, 32)
+	plain := []byte("linux-master-key-secret")
+	sealed, err := sealAESGCM(key, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sealed, plain) {
+		t.Fatal("AES-GCM payload contains plaintext")
+	}
+	opened, err := openAESGCM(key, sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(opened, plain) {
+		t.Fatalf("AES-GCM round trip mismatch: %q", opened)
+	}
+	tampered := append([]byte(nil), sealed...)
+	tampered[len(tampered)-1] ^= 0x01
+	if _, err := openAESGCM(key, tampered); err == nil {
+		t.Fatal("tampered AES-GCM payload should fail authentication")
 	}
 }
 

@@ -23,7 +23,10 @@ var (
 	procLocalFree          = kernel32.NewProc("LocalFree")
 )
 
-func available() bool { return true }
+func available() bool                { return true }
+func platformPrefix() string         { return "dpapi:v1:" }
+func platformProtectionName() string { return "dpapi-current-user" }
+func prepareRuntime(...string) error { return nil }
 
 func protectBytes(plain []byte) ([]byte, error) {
 	in := bytesToBlob(plain)

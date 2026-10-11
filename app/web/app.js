@@ -321,7 +321,7 @@ function renderAccounts() {
 async function loadAccounts() {
   try {
     const body = await apiFetch("/api/ui/accounts");
-    state.accounts = body.items || [];
+    state.accounts = body.items || body.accounts || [];
     state.routing = body.routing || { strategy: "round_robin" };
     renderAccounts();
   } catch (error) {
@@ -791,7 +791,7 @@ async function checkOAuthCompletion() {
   state.oauth.pollBusy = true;
   try {
     const body = await apiFetch("/api/ui/accounts");
-    state.accounts = body.items || [];
+    state.accounts = body.items || body.accounts || [];
     state.routing = body.routing || state.routing;
     renderAccounts();
     const account = state.accounts.find((item) => item.id === state.oauth.accountId);

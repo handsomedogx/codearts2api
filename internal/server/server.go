@@ -20,6 +20,7 @@ import (
 	"github.com/handsomedogx/codearts2api/internal/gateway"
 	"github.com/handsomedogx/codearts2api/internal/keepalive"
 	"github.com/handsomedogx/codearts2api/internal/observe"
+	"github.com/handsomedogx/codearts2api/internal/securestore"
 	"github.com/handsomedogx/codearts2api/internal/storage"
 	"github.com/handsomedogx/codearts2api/internal/subscription"
 )
@@ -44,6 +45,17 @@ func NewRuntime() (http.Handler, func(), error) {
 	settings := config.Load()
 	if err := storage.MigrateNonSensitive(settings); err != nil {
 		return nil, nil, fmt.Errorf("migrate legacy data: %w", err)
+	}
+	securePaths := []string{settings.GatewaySettingsFile, settings.PendingAuthFile, settings.AccountsDir}
+	if settings.MigrateLegacy {
+		securePaths = append(securePaths,
+			filepath.Join(settings.LegacyDataDir, "settings.json"),
+			filepath.Join(settings.LegacyDataDir, "oauth_pending.json"),
+			filepath.Join(settings.LegacyDataDir, "accounts"),
+		)
+	}
+	if err := securestore.PrepareRuntime(securePaths...); err != nil {
+		return nil, nil, fmt.Errorf("initialize secure credential storage: %w", err)
 	}
 	a := newAPI(settings)
 	if err := a.auth.MigrateSensitiveStorage(); err != nil {
@@ -82,7 +94,11 @@ func newAPI(settings config.Settings) *API {
 
 func (a *API) routes() {
 	a.mux.HandleFunc("GET /", a.webUI)
-	a.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(webui.FS()))))
+	staticFiles := http.StripPrefix("/static/", http.FileServer(http.FS(webui.FS())))
+	a.mux.Handle("GET /static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		staticFiles.ServeHTTP(w, r)
+	}))
 	a.mux.HandleFunc("GET /health", a.health)
 	a.mux.HandleFunc("GET /api/ui/meta", a.meta)
 	a.mux.HandleFunc("GET /api/ui/access", a.access)
@@ -129,6 +145,7 @@ func (a *API) webUI(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "web_ui_error")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(index)
@@ -267,7 +284,11 @@ func (a *API) accounts(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    accounts,
+		"accounts": accounts,
+		"routing":  a.routingPayload(),
+	})
 }
 
 func (a *API) refreshAccount(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +377,10 @@ func (a *API) probeAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": results})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    results,
+		"accounts": results,
+	})
 }
 
 func (a *API) deleteAccount(w http.ResponseWriter, r *http.Request) {
@@ -369,11 +393,16 @@ func (a *API) deleteAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) routing(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, a.routingPayload())
+}
+
+func (a *API) routingPayload() map[string]any {
+	return map[string]any{
 		"strategy":              a.codearts.Pool.RoutingStrategy(),
 		"max_concurrency":       a.settings.AccountMaxConcurrency,
 		"retry_budget_attempts": a.settings.RetryBudgetAttempts,
-	})
+		"retry_budget_seconds":  a.settings.RetryBudgetSeconds,
+	}
 }
 
 func (a *API) routingUpdate(w http.ResponseWriter, r *http.Request) {

@@ -11,9 +11,9 @@ import (
 	"github.com/handsomedogx/codearts2api/internal/securestore"
 )
 
-func TestPlaintextAccountMigratesToDPAPI(t *testing.T) {
+func TestPlaintextAccountMigratesToProtectedStorage(t *testing.T) {
 	if !securestore.Available() {
-		t.Skip("DPAPI is only available on Windows")
+		t.Skip("platform secure storage is unavailable")
 	}
 	root := t.TempDir()
 	legacy := filepath.Join(root, "legacy")
@@ -60,17 +60,17 @@ func TestPlaintextAccountMigratesToDPAPI(t *testing.T) {
 			t.Fatalf("secret %q leaked into migrated file: %s", secret, string(migrated))
 		}
 	}
-	if !strings.Contains(string(migrated), "dpapi-current-user") || !strings.Contains(string(migrated), "dpapi:v1:") {
-		t.Fatalf("migrated account is not DPAPI protected: %s", string(migrated))
+	if !strings.Contains(string(migrated), securestore.ProtectionName()) || !strings.Contains(string(migrated), securestore.Prefix()) {
+		t.Fatalf("migrated account is not protected: %s", string(migrated))
 	}
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
 		t.Fatalf("legacy plaintext account should be removed, stat err=%v", err)
 	}
 }
 
-func TestPlaintextPendingLoginMigratesToDPAPI(t *testing.T) {
+func TestPlaintextPendingLoginMigratesToProtectedStorage(t *testing.T) {
 	if !securestore.Available() {
-		t.Skip("DPAPI is only available on Windows")
+		t.Skip("platform secure storage is unavailable")
 	}
 	root := t.TempDir()
 	legacy := filepath.Join(root, "legacy")
