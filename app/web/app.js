@@ -7,6 +7,8 @@ const state = {
   routing: { strategy: "round_robin" },
   models: [],
   logs: [],
+  usage: null,
+  usageDays: 3,
   responseText: "",
   sending: false,
   runtimeOk: null,
@@ -75,19 +77,6 @@ function shortId(value) {
   return `${value.slice(0, 7)}…${value.slice(-5)}`;
 }
 
-function expiryLabel(value) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const diff = date.getTime() - Date.now();
-  if (diff <= 0) return tr("Expired");
-  const mins = Math.round(diff / 60000);
-  if (mins < 60) return window.codeartsI18n.getLanguage() === "zh-CN" ? `${mins} 分钟` : `${mins} min`;
-  const hours = Math.round(mins / 60);
-  if (hours < 48) return window.codeartsI18n.getLanguage() === "zh-CN" ? `${hours} 小时` : `${hours} hr`;
-  return date.toLocaleString(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US");
-}
-
 function absoluteBaseUrl() {
   return `${location.origin}/v1`;
 }
@@ -129,12 +118,6 @@ async function loadMeta() {
   }
 }
 
-function accountHost(environment) {
-  return environment === "international"
-    ? "codearts.ap-southeast-1.huaweicloud.com"
-    : "codearts.huaweicloud.com";
-}
-
 function createAccountAction(label, action, accountId, extraClass = "ghost") {
   const button = document.createElement("button");
   button.type = "button";
@@ -143,6 +126,79 @@ function createAccountAction(label, action, accountId, extraClass = "ghost") {
   button.dataset.accountAction = action;
   button.dataset.accountId = accountId;
   return button;
+}
+
+function relativeTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  const zh = window.codeartsI18n.getLanguage() === "zh-CN";
+  if (seconds < 45) return tr("Just now");
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return zh ? `${minutes} 分钟前` : `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return zh ? `${hours} 小时前` : `${hours} hr ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return zh ? `${days} 天前` : `${days} d ago`;
+  return date.toLocaleDateString(zh ? "zh-CN" : "en-US");
+}
+
+function formatLatency(value) {
+  if (!Number.isFinite(value) || value < 0) return "—";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  const seconds = value / 1000;
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+}
+
+function formatCount(value) {
+  if (!Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US", {
+    notation: value >= 10000 ? "compact" : "standard",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+function formatTokenCount(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "—";
+  const abs = Math.abs(number);
+  if (abs >= 1e9) return `${(number / 1e9).toFixed(abs >= 1e10 ? 1 : 2).replace(/\.0+$|(?<=\.[0-9])0+$/g, "")}G`;
+  if (abs >= 1e6) return `${(number / 1e6).toFixed(abs >= 1e8 ? 1 : 2).replace(/\.0+$|(?<=\.[0-9])0+$/g, "")}M`;
+  if (abs >= 1e3) return `${(number / 1e3).toFixed(abs >= 1e5 ? 1 : 2).replace(/\.0+$|(?<=\.[0-9])0+$/g, "")}K`;
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(number);
+}
+
+function quotaForAccount(accountId) {
+  const items = state.usage?.official_quota?.items || [];
+  return items.find((item) => item.account_id === accountId) || null;
+}
+
+function createMetricBadge(text, className = "") {
+  const badge = document.createElement("span");
+  badge.className = `account-metric-badge ${className}`.trim();
+  badge.textContent = text;
+  return badge;
+}
+
+function accountStatusPill(account) {
+  const status = document.createElement("span");
+  const healthStatus = account.health?.status || "healthy";
+  if (!account.authenticated) {
+    status.className = "pill neutral";
+    status.textContent = tr("Not connected");
+  } else if (healthStatus === "cooldown") {
+    status.className = "pill danger";
+    status.textContent = tr("Cooldown");
+    if (account.health?.cooldown_until) status.title = `${tr("Cooldown until")} ${account.health.cooldown_until}`;
+  } else if (healthStatus === "degraded") {
+    status.className = "pill warning";
+    status.textContent = tr("Degraded");
+  } else {
+    status.className = "pill success";
+    status.textContent = tr("Available");
+  }
+  return status;
 }
 
 function renderAccounts() {
@@ -154,47 +210,107 @@ function renderAccounts() {
   $("routingStrategy").value = state.routing.strategy;
 
   if (!state.accounts.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 7;
     const empty = document.createElement("div");
     empty.className = "account-pool-empty";
-    empty.innerHTML = `<strong>${tr("No accounts yet")}</strong><span>${tr("Add a China or International CodeArts account to start routing requests.")}</span>`;
-    list.appendChild(empty);
+    const title = document.createElement("strong");
+    title.textContent = tr("No accounts yet");
+    const hint = document.createElement("span");
+    hint.textContent = tr("Add a China or International CodeArts account to start routing requests.");
+    empty.append(title, hint);
+    cell.appendChild(empty);
+    row.appendChild(cell);
+    list.appendChild(row);
     return;
   }
 
   state.accounts.forEach((account) => {
-    const row = document.createElement("div");
-    row.className = "account-site-row";
-    const main = document.createElement("div");
-    main.className = "account-site-main";
-    const badge = document.createElement("div");
-    badge.className = "account-site-badge";
-    badge.textContent = account.environment === "international" ? "INTL" : "CN";
-    const copy = document.createElement("div");
-    copy.className = "account-site-copy";
-    const title = document.createElement("div");
-    title.className = "account-site-title";
-    const name = document.createElement("span");
-    name.textContent = account.user_name || shortId(account.user_id) || tr("CodeArts account");
-    const env = document.createElement("span");
-    env.className = "pill neutral";
-    env.textContent = environmentLabel(account.environment);
-    title.append(name, env);
-    const meta = document.createElement("div");
-    meta.className = "account-site-user";
-    meta.textContent = `${accountHost(account.environment)} · ${expiryLabel(account.expires_at)} · ${shortId(account.id)}`;
-    meta.title = account.id;
-    copy.append(title, meta);
-    main.append(badge, copy);
+    const row = document.createElement("tr");
+    row.className = `account-table-row health-${account.health?.status || "healthy"}`;
 
+    const identityCell = document.createElement("td");
+    const identity = document.createElement("div");
+    identity.className = "account-identity";
+    const name = document.createElement("span");
+    name.className = "account-identity-name";
+    name.textContent = account.user_name || shortId(account.user_id) || tr("CodeArts account");
+    const meta = document.createElement("div");
+    meta.className = "account-identity-meta";
+    const env = document.createElement("span");
+    env.className = "account-env-tag";
+    env.textContent = account.environment === "international" ? "INTL" : "CN";
+    const id = document.createElement("span");
+    id.textContent = shortId(account.id);
+    id.title = account.id;
+    meta.append(env, id);
+    identity.append(name, meta);
+    identityCell.appendChild(identity);
+
+    const statusCell = document.createElement("td");
+    statusCell.appendChild(accountStatusPill(account));
+
+    const resultCell = document.createElement("td");
+    resultCell.className = "account-result-cell";
+    const success = document.createElement("span");
+    success.className = "account-success-count";
+    success.textContent = formatCount(Number(account.stats?.success_count ?? account.health?.total_successes ?? 0));
+    const divider = document.createElement("span");
+    divider.className = "account-count-divider";
+    divider.textContent = "/";
+    const failure = document.createElement("span");
+    failure.className = "account-failure-count";
+    failure.textContent = formatCount(Number(account.stats?.failure_count ?? account.health?.total_failures ?? 0));
+    resultCell.append(success, divider, failure);
+
+    const inFlightCell = document.createElement("td");
+    inFlightCell.className = "account-inflight-cell";
+    inFlightCell.textContent = formatCount(Number(account.stats?.concurrency ?? account.stats?.in_flight ?? 0));
+
+    const activityCell = document.createElement("td");
+    const metrics = document.createElement("div");
+    metrics.className = "account-metrics";
+    const requestCount = Number(account.stats?.request_count || 0);
+    if (requestCount > 0) metrics.appendChild(createMetricBadge(`${formatCount(requestCount)} ${tr("requests")}`, "requests"));
+    if (Number.isFinite(account.stats?.avg_latency_ms)) metrics.appendChild(createMetricBadge(`${formatLatency(account.stats.avg_latency_ms)} ${tr("avg")}`, "latency"));
+    if (Number.isFinite(account.stats?.total_tokens) && account.stats.total_tokens > 0) metrics.appendChild(createMetricBadge(`${formatTokenCount(account.stats.total_tokens)} tok`, "tokens"));
+    if (Number.isFinite(account.stats?.avg_output_tps) && account.stats.avg_output_tps > 0) metrics.appendChild(createMetricBadge(`${account.stats.avg_output_tps.toFixed(1)} tok/s`, "throughput"));
+    const quota = quotaForAccount(account.id);
+    if (quota?.available) {
+      const quotaRow = document.createElement("div");
+      quotaRow.className = `account-quota${quota.over_limit ? " over" : ""}`;
+      const quotaBar = document.createElement("span");
+      quotaBar.className = "account-quota-bar";
+      const quotaFill = document.createElement("span");
+      quotaFill.style.width = `${Math.min(100, Number(quota.progress_percent || 0))}%`;
+      quotaBar.appendChild(quotaFill);
+      const quotaText = document.createElement("span");
+      quotaText.textContent = `${tr("Official")} ${formatTokenCount(quota.used_tokens)} / ${formatTokenCount(quota.quota_tokens)}`;
+      quotaRow.append(quotaBar, quotaText);
+      metrics.appendChild(quotaRow);
+    }
+    if (!metrics.childElementCount) {
+      const emptyMetric = document.createElement("span");
+      emptyMetric.className = "account-empty-value";
+      emptyMetric.textContent = "—";
+      metrics.appendChild(emptyMetric);
+    }
+    activityCell.appendChild(metrics);
+
+    const recentCell = document.createElement("td");
+    recentCell.className = "account-recent-cell";
+    recentCell.textContent = relativeTime(account.health?.last_success_at);
+    if (account.health?.last_success_at) recentCell.title = account.health.last_success_at;
+
+    const actionCell = document.createElement("td");
     const actions = document.createElement("div");
-    actions.className = "account-site-actions";
-    const status = document.createElement("span");
-    status.className = `pill ${account.authenticated ? "success" : "neutral"}`;
-    status.textContent = account.authenticated ? tr("Connected") : tr("Not connected");
-    actions.appendChild(status);
-    if (account.refresh_available) actions.appendChild(createAccountAction(tr("Refresh token"), "refresh", account.id));
+    actions.className = "account-row-actions";
+    if (account.refresh_available) actions.appendChild(createAccountAction(tr("Refresh"), "refresh", account.id));
     actions.appendChild(createAccountAction(tr("Remove"), "delete", account.id, "danger ghost"));
-    row.append(main, actions);
+    actionCell.appendChild(actions);
+
+    row.append(identityCell, statusCell, resultCell, inFlightCell, activityCell, recentCell, actionCell);
     list.appendChild(row);
   });
 }
@@ -265,6 +381,17 @@ function renderModels(items) {
     owner.className = "model-owner";
     owner.textContent = tr("owned by {owner}", { owner: model.owned_by || "codearts" });
     copy.append(name, owner);
+    const limits = [
+      model.context_window ? `${formatTokenCount(model.context_window)} ${tr("context")}` : "",
+      model.input_length ? `${formatTokenCount(model.input_length)} ${tr("input")}` : "",
+      model.max_tokens ? `${formatTokenCount(model.max_tokens)} ${tr("max output")}` : "",
+    ].filter(Boolean);
+    if (limits.length) {
+      const limitLine = document.createElement("div");
+      limitLine.className = "model-limits";
+      limitLine.textContent = limits.join(" · ");
+      copy.appendChild(limitLine);
+    }
     info.append(symbol, copy);
     const badge = document.createElement("span");
     badge.className = "pill neutral";
@@ -285,6 +412,142 @@ async function loadModels() {
     renderModels(body.data || []);
   } catch (error) {
     if (!String(error.message).includes("401")) toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `获取模型失败：${error.message}` : `Models failed: ${error.message}`), "error");
+  }
+}
+
+function renderOfficialQuota(official) {
+  const panel = $("officialQuotaPanel");
+  panel.classList.toggle("over-limit", Boolean(official?.over_limit));
+  const bar = $("officialQuotaBar");
+  if (!official?.available) {
+    $("officialQuotaTitle").textContent = tr("Official quota unavailable");
+    $("officialQuotaMeta").textContent = tr("Package usage is read from CodeArts directly.");
+    $("officialQuotaPercent").textContent = "—";
+    bar.style.width = "0%";
+    return;
+  }
+  const packages = (official.package_names || []).join(" + ") || tr("CodeArts package");
+  $("officialQuotaTitle").textContent = `${formatTokenCount(official.used_tokens)} / ${formatTokenCount(official.quota_tokens)} tok · ${packages}`;
+  const periodItems = official.items || [];
+  const starts = periodItems.map((item) => item.start_date).filter(Boolean).sort();
+  const ends = periodItems.map((item) => item.end_date).filter(Boolean).sort();
+  const period = starts.length && ends.length ? `${starts[0]} → ${ends[ends.length - 1]}` : "";
+  const accountText = `${official.account_count} ${tr(official.account_count === 1 ? "account" : "accounts")}`;
+  const limitText = official.over_limit ? tr("Package reference quota exceeded; CodeArts may still allow usage.") : tr("Official CodeArts package usage.");
+  $("officialQuotaMeta").textContent = [accountText, period, limitText].filter(Boolean).join(" · ");
+  $("officialQuotaPercent").textContent = Number.isFinite(official.usage_percent) ? `${official.usage_percent.toLocaleString("en-US", { maximumFractionDigits: 1 })}%` : "—";
+  bar.style.width = `${Math.min(100, Number(official.progress_percent || 0))}%`;
+}
+
+function renderUsageChart(usage) {
+  const canvas = $("usageChart");
+  const empty = $("usageChartEmpty");
+  const buckets = usage?.buckets || [];
+  const hasData = buckets.some((bucket) => Number(bucket.total_tokens || 0) > 0 || Number(bucket.requests || 0) > 0);
+  empty.classList.toggle("hidden", hasData);
+  const cssWidth = Math.max(320, canvas.parentElement.clientWidth - 20);
+  const cssHeight = 250;
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(cssWidth * dpr);
+  canvas.height = Math.floor(cssHeight * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+  const left = 54, right = 12, top = 14, bottom = 28;
+  const plotW = Math.max(1, cssWidth - left - right);
+  const plotH = Math.max(1, cssHeight - top - bottom);
+  const maxValue = Math.max(1, ...buckets.map((item) => Number(item.total_tokens || 0)), Number(usage?.average_bucket_tokens || 0));
+  const axisMax = maxValue * 1.08;
+  ctx.font = "9px ui-monospace, SFMono-Regular, Consolas, monospace";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= 4; i += 1) {
+    const y = top + plotH * (i / 4);
+    const value = axisMax * (1 - i / 4);
+    ctx.strokeStyle = "#202530";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(cssWidth - right, y); ctx.stroke();
+    ctx.fillStyle = "#61697a";
+    ctx.fillText(formatTokenCount(value), left - 8, y);
+  }
+
+  if (buckets.length) {
+    const slot = plotW / buckets.length;
+    const barW = Math.max(2, Math.min(18, slot * 0.66));
+    buckets.forEach((bucket, index) => {
+      const x = left + slot * index + (slot - barW) / 2;
+      const prompt = Number(bucket.prompt_tokens || 0);
+      const completion = Number(bucket.completion_tokens || 0);
+      const promptH = prompt / axisMax * plotH;
+      const completionH = completion / axisMax * plotH;
+      const baseY = top + plotH;
+      if (promptH > 0) {
+        ctx.fillStyle = "#607cf0";
+        ctx.fillRect(x, baseY - promptH, barW, promptH);
+      }
+      if (completionH > 0) {
+        ctx.fillStyle = "#43c793";
+        ctx.fillRect(x, baseY - promptH - completionH, barW, Math.max(1, completionH));
+      }
+    });
+
+    const avg = Number(usage?.average_bucket_tokens || 0);
+    if (avg > 0) {
+      const y = top + plotH - avg / axisMax * plotH;
+      ctx.strokeStyle = "#d49b44";
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(cssWidth - right, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#c7964b";
+      ctx.textAlign = "left";
+      ctx.fillText(`${tr("avg")} ${formatTokenCount(avg)}`, left + 4, Math.max(top + 7, y - 8));
+    }
+
+    const tickIndices = [...new Set([0, Math.floor((buckets.length - 1) / 4), Math.floor((buckets.length - 1) / 2), Math.floor((buckets.length - 1) * 3 / 4), buckets.length - 1])];
+    ctx.fillStyle = "#61697a";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    tickIndices.forEach((index) => {
+      const date = new Date(buckets[index].start);
+      const label = Number(usage?.range_days || 3) <= 3
+        ? date.toLocaleString(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US", { weekday: "short", hour: "2-digit", minute: "2-digit" })
+        : date.toLocaleDateString(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US", { month: "short", day: "numeric" });
+      ctx.fillText(label, left + slot * index + slot / 2, top + plotH + 8);
+    });
+  }
+}
+
+function renderUsage() {
+  const usage = state.usage;
+  if (!usage) return;
+  $("usageRequests").textContent = formatCount(Number(usage.request_count || 0));
+  $("usageRequestSub").textContent = `${formatCount(Number(usage.failure_count || 0))} ${tr("failures")}`;
+  $("usageTotalTokens").textContent = formatTokenCount(usage.total_tokens);
+  $("usageTokenShare").textContent = `prompt ${Number(usage.prompt_share || 0).toFixed(1)}% · completion ${Number(usage.completion_share || 0).toFixed(1)}%`;
+  $("usagePromptTokens").textContent = formatTokenCount(usage.prompt_tokens);
+  $("usagePromptShare").textContent = `${tr("share")} ${Number(usage.prompt_share || 0).toFixed(1)}%`;
+  $("usageCompletionTokens").textContent = formatTokenCount(usage.completion_tokens);
+  $("usageCompletionShare").textContent = `${tr("share")} ${Number(usage.completion_share || 0).toFixed(1)}%`;
+  $("usageFailures").textContent = formatCount(Number(usage.failure_count || 0));
+  $("usageSuccessRate").textContent = `${Number(usage.success_rate || 0).toFixed(1)}% ${tr("success")}`;
+  $("usageLatency").textContent = formatLatency(Number(usage.avg_latency_ms || 0));
+  $("usageThroughput").textContent = `${Number(usage.avg_output_tps || 0).toFixed(1)} tok/s`;
+  $("usageRangeMeta").textContent = `${tr("Last {days} days", { days: usage.range_days })} · ${usage.points} ${tr("points")}`;
+  const peakTime = usage.peak_at ? new Date(usage.peak_at).toLocaleString(window.codeartsI18n.getLanguage() === "zh-CN" ? "zh-CN" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+  $("usageChartMeta").textContent = `${usage.points} ${tr("points")} · ${tr("peak")} ${formatTokenCount(usage.peak_tokens)} @ ${peakTime} · ${tr("average")} ${formatTokenCount(usage.average_bucket_tokens)}`;
+  renderOfficialQuota(usage.official_quota);
+  renderUsageChart(usage);
+  renderAccounts();
+}
+
+async function loadUsage(forceQuota = false) {
+  try {
+    const suffix = forceQuota ? "&refresh_quota=true" : "";
+    state.usage = await apiFetch(`/api/ui/usage?days=${state.usageDays}${suffix}`);
+    renderUsage();
+  } catch (error) {
+    if (!String(error.message).includes("401")) toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `获取用量失败：${error.message}` : `Usage failed: ${error.message}`), "error");
   }
 }
 
@@ -338,7 +601,7 @@ async function loadLogs() {
 
 async function loadAll() {
   await loadMeta();
-  await Promise.all([loadAccounts(), loadModels(), loadLogs()]);
+  await Promise.all([loadAccounts(), loadModels(), loadLogs(), loadUsage(false)]);
 }
 
 function navigate(view) {
@@ -517,7 +780,7 @@ async function saveApiKey() {
   if (key) localStorage.setItem("codearts2api.apiKey", key);
   else localStorage.removeItem("codearts2api.apiKey");
   updateApiKeySettings();
-  await Promise.all([loadAccounts(), loadModels(), loadLogs()]);
+  await Promise.all([loadAccounts(), loadModels(), loadLogs(), loadUsage(false)]);
   toast(tr("Local API key saved"), "success");
 }
 
@@ -618,7 +881,7 @@ async function sendPlayground() {
     setStreamState("online", "Completed");
     $("responseTime").textContent = `${Math.round(performance.now() - started)} ms total`;
     if (!state.responseText) $("responseOutput").textContent = tr("Completed with an empty response.");
-    await loadLogs();
+    await Promise.all([loadLogs(), loadAccounts(), loadUsage(false)]);
   } catch (error) {
     setStreamState("error", "Failed");
     state.lastError = error.message;
@@ -665,6 +928,11 @@ $("accountList").addEventListener("click", (event) => {
 $("routingStrategy").addEventListener("change", updateRouting);
 $("refreshAllBtn").addEventListener("click", loadAll);
 $("refreshLogsBtn").addEventListener("click", loadLogs);
+$("refreshUsageBtn").addEventListener("click", () => loadUsage(true));
+$("usageRange").addEventListener("change", () => {
+  state.usageDays = Number($("usageRange").value || 3);
+  loadUsage(false);
+});
 $("saveApiKeyBtn").addEventListener("click", saveApiKey);
 $("clearApiKeyBtn").addEventListener("click", clearApiKey);
 $("sendBtn").addEventListener("click", sendPlayground);
@@ -723,6 +991,7 @@ window.addEventListener("codearts2api:languagechange", () => {
   renderAccounts();
   renderOAuthWizard();
   if (state.models.length) renderModels(state.models);
+  if (state.usage) renderUsage();
   renderLogs(state.logs);
   setStreamState(state.streamMode, state.streamState);
   if (!state.sending) {
@@ -733,8 +1002,13 @@ window.addEventListener("codearts2api:languagechange", () => {
   }
 });
 
+window.addEventListener("resize", () => { if (state.usage) renderUsageChart(state.usage); });
+
 window.codeartsI18n.setLanguage(window.codeartsI18n.getLanguage(), false);
 loadAll();
 setInterval(() => {
   if ($("view-logs").classList.contains("active")) loadLogs();
 }, 5000);
+setInterval(() => {
+  if ($("view-dashboard").classList.contains("active")) loadAccounts();
+}, 2500);

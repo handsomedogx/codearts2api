@@ -9,16 +9,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.codearts.auth import AuthManager, get_auth_manager
-from app.codearts.client import CodeArtsClient
+from app.codearts.errors import CodeArtsUpstreamError
+from app.codearts.gateway import CodeArtsGateway
+from app.codearts.model_catalog import get_model_catalog
+from app.codearts.subscription import get_subscription_catalog
+from app.codearts.usage import get_usage_store
 from app.config import Settings, get_settings, normalize_environment
 from app.models import ChatCompletionRequest
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 REQUEST_LOGS: deque[dict] = deque(maxlen=200)
 
@@ -205,6 +209,18 @@ async def ui_logs(limit: int = Query(default=50, ge=1, le=200)) -> dict:
     return {"items": list(REQUEST_LOGS)[:limit]}
 
 
+@app.get("/api/ui/usage", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+async def ui_usage(
+    days: int = Query(default=3, ge=1, le=90),
+    refresh_quota: bool = Query(default=False),
+    settings: Settings = Depends(get_settings),
+    auth: AuthManager = Depends(get_request_auth_manager),
+) -> dict:
+    summary = get_usage_store(settings).summary(days=days, points=30)
+    official = await get_subscription_catalog(settings, auth).aggregate(force=refresh_quota)
+    return {**summary, "official_quota": official}
+
+
 @app.get("/health")
 async def health(
     settings: Settings = Depends(get_settings),
@@ -272,13 +288,30 @@ async def oauth_callback(
 
 
 @app.get("/v1/models", dependencies=[Depends(require_local_api_key)])
-async def models(settings: Settings = Depends(get_settings)) -> dict:
+async def models(
+    refresh: bool = Query(default=False),
+    settings: Settings = Depends(get_settings),
+    auth: AuthManager = Depends(get_request_auth_manager),
+) -> dict:
     now = int(time.time())
+    items = await get_model_catalog(settings, auth).list_models(force=refresh)
     return {
         "object": "list",
         "data": [
-            {"id": model, "object": "model", "created": now, "owned_by": "codearts"}
-            for model in _model_list(settings)
+            {
+                "id": item["id"],
+                "object": "model",
+                "created": now,
+                "owned_by": item.get("owned_by") or "codearts",
+                "display_name": item.get("display_name") or item["id"],
+                "codearts_sources": item.get("sources", []),
+                "codearts_environments": item.get("environments", []),
+                "context_window": item.get("context_window"),
+                "input_length": item.get("input_length"),
+                "max_tokens": item.get("max_tokens"),
+                "thinking_type": item.get("thinking_type"),
+            }
+            for item in items
         ],
     }
 
@@ -298,34 +331,33 @@ def _chunk(completion_id: str, model: str, content: str | None = None, finish_re
 @app.post("/v1/chat/completions", dependencies=[Depends(require_local_api_key)])
 async def chat_completions(
     request: ChatCompletionRequest,
+    response: Response,
     settings: Settings = Depends(get_settings),
     auth: AuthManager = Depends(get_request_auth_manager),
     x_codearts_account: str | None = Header(default=None, alias="X-CodeArts-Account"),
+    x_codearts_conversation: str | None = Header(default=None, alias="X-CodeArts-Conversation"),
 ):
-    selected = await auth.choose_account(x_codearts_account)
-    if selected is None:
-        raise HTTPException(
-            status_code=503,
-            detail="No usable CodeArts account is available. Add an account from the dashboard first.",
-        )
-    account, credentials = selected
-    environment = account["environment"]
-    account_id = account["id"]
-    client = CodeArtsClient(
-        settings,
-        auth_manager=auth,
-        environment=environment,
-        account_id=account_id,
-        credentials=credentials,
-    )
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     messages = _messages(request)
+    gateway = CodeArtsGateway(settings, auth)
+    requested_conversation_id = x_codearts_conversation or request.conversation_id
+    try:
+        conversation = gateway.resolve_conversation(messages, requested_conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    conversation_id = str(conversation["id"])
 
     if request.stream:
         async def event_stream() -> AsyncIterator[str]:
             yield _chunk(completion_id, request.model, None, None)
             try:
-                async for delta in client.chat_stream(messages=messages, model=request.model, user=request.user):
+                async for delta in gateway.stream(
+                    messages=messages,
+                    model=request.model,
+                    user=request.user,
+                    context=conversation,
+                    explicit_account_id=x_codearts_account,
+                ):
                     yield _chunk(completion_id, request.model, delta, None)
                 yield _chunk(completion_id, request.model, None, "stop")
                 yield "data: [DONE]\n\n"
@@ -334,13 +366,27 @@ async def chat_completions(
                 yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"X-CodeArts-Conversation": conversation_id},
+        )
 
     try:
-        content = await client.chat(messages=messages, model=request.model, user=request.user)
+        result = await gateway.complete(
+            messages=messages,
+            model=request.model,
+            user=request.user,
+            context=conversation,
+            explicit_account_id=x_codearts_account,
+        )
+    except CodeArtsUpstreamError as exc:
+        status_code = 503 if exc.category == "no_account" else 502
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    response.headers["X-CodeArts-Conversation"] = result.conversation_id
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -349,9 +395,13 @@ async def chat_completions(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": {"role": "assistant", "content": result.text},
                 "finish_reason": "stop",
             }
         ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": result.usage,
+        "conversation_id": result.conversation_id,
+        "codearts_account": result.account_id,
+        "codearts_environment": result.environment,
+        "codearts_attempts": result.attempts,
     }

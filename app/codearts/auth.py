@@ -261,6 +261,9 @@ class AuthManager:
                 "pkce_pair": context["pkce_pair"],
                 "dpop_key_pair": context["dpop_key_pair"],
             },
+            # Preserve operational state across OAuth refreshes.
+            "stats": dict(previous.get("stats") or {}),
+            "health": dict(previous.get("health") or {}),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -371,17 +374,35 @@ class AuthManager:
             source="account_pool",
         )
 
-    async def choose_account(self, account_id: str | None = None) -> tuple[dict[str, Any], ActiveCredentials] | None:
-        record = self.pool.choose(account_id)
-        if record:
+    async def account_candidates(
+        self,
+        *,
+        account_id: str | None = None,
+        preferred_account_id: str | None = None,
+        exclude_ids: set[str] | None = None,
+    ) -> list[tuple[dict[str, Any], ActiveCredentials]]:
+        candidates: list[tuple[dict[str, Any], ActiveCredentials]] = []
+        records = self.pool.candidates(
+            account_id=account_id,
+            preferred_account_id=preferred_account_id,
+            exclude_ids=exclude_ids,
+        )
+        for record in records:
             selected_id = str(record.get("id") or "")
-            credentials = await self.get_account_credentials(selected_id)
+            try:
+                credentials = await self.get_account_credentials(selected_id)
+            except Exception:
+                self.pool.mark_failure(selected_id, category="credential_refresh")
+                continue
             if credentials is None:
-                return None
+                self.pool.mark_failure(selected_id, category="credentials_unavailable")
+                continue
             refreshed = self.pool.get(selected_id) or record
-            return self.pool.public(refreshed), credentials
-        if account_id:
-            return None
+            candidates.append((self.pool.public(refreshed), credentials))
+
+        if candidates or account_id:
+            return candidates
+
         for environment in ("cn", "international"):
             if self.settings.env_credentials_ready_for(environment):
                 credentials = ActiveCredentials(
@@ -391,7 +412,7 @@ class AuthManager:
                     domain_id=self.settings.domain_id,
                     source="env",
                 )
-                return ({
+                candidates.append(({
                     "id": f"manual-{environment}",
                     "environment": environment,
                     "environment_label": self.settings.profile(environment).label,
@@ -402,8 +423,13 @@ class AuthManager:
                     "user_id": "",
                     "user_name": "",
                     "domain_id": self.settings.domain_id,
-                }, credentials)
-        return None
+                    "health": {"status": "healthy"},
+                }, credentials))
+        return candidates
+
+    async def choose_account(self, account_id: str | None = None) -> tuple[dict[str, Any], ActiveCredentials] | None:
+        candidates = await self.account_candidates(account_id=account_id)
+        return candidates[0] if candidates else None
 
     def delete_account(self, account_id: str) -> bool:
         return self.pool.delete(account_id)

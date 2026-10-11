@@ -18,6 +18,7 @@ def _settings(tmp_path) -> Settings:
         pending_auth_file=str(tmp_path / "auth_pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
     )
 
 
@@ -222,7 +223,7 @@ def test_explicit_account_header_routes_by_account_environment(monkeypatch, tmp_
     manager.pool.save(_record("cn-a", ENV_CN, "alice"), "cn-a")
     manager.pool.save(_record("intl-a", ENV_INTERNATIONAL, "carol"), "intl-a")
 
-    async def fake_chat(self, *, messages, model, user=None):
+    async def fake_chat(self, *, messages, model, user=None, **kwargs):
         assert self.account_id == "intl-a"
         assert self.environment == ENV_INTERNATIONAL
         return "ok"

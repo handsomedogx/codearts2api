@@ -20,5 +20,6 @@ class ChatCompletionRequest(BaseModel):
     top_p: float | None = None
     max_tokens: int | None = None
     user: str | None = None
+    conversation_id: str | None = None
 
     model_config = {"extra": "allow"}

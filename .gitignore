@@ -6,3 +6,5 @@ __pycache__/
 data/accounts/
 data/routing.json
 data/oauth_pending.json
+data/conversations/
+data/usage.jsonl

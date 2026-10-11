@@ -12,6 +12,8 @@ def test_health_and_models_exist(tmp_path) -> None:
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -35,6 +37,8 @@ def test_chat_requires_credentials(tmp_path) -> None:
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -56,13 +60,16 @@ def _credentialed_settings(tmp_path) -> Settings:
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
     )
 
 
 def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
-    async def fake_chat(self, *, messages, model, user=None):
+    async def fake_chat(self, *, messages, model, user=None, **kwargs):
         assert messages == [{"role": "user", "content": "hello"}]
         assert model == "codearts-auto"
+        self.last_usage = {"prompt_tokens": 97, "completion_tokens": 2, "total_tokens": 99}
         return "Hello from CodeArts"
 
     monkeypatch.setattr(CodeArtsClient, "chat", fake_chat)
@@ -78,12 +85,13 @@ def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
         assert body["object"] == "chat.completion"
         assert body["choices"][0]["message"]["content"] == "Hello from CodeArts"
         assert body["choices"][0]["finish_reason"] == "stop"
+        assert body["usage"] == {"prompt_tokens": 97, "completion_tokens": 2, "total_tokens": 99}
     finally:
         app.dependency_overrides.clear()
 
 
 def test_streaming_openai_translation(monkeypatch, tmp_path) -> None:
-    async def fake_chat_stream(self, *, messages, model, user=None):
+    async def fake_chat_stream(self, *, messages, model, user=None, **kwargs):
         yield "Hel"
         yield "lo"
 
@@ -114,6 +122,8 @@ def test_auth_endpoints_do_not_expose_secrets(tmp_path) -> None:
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -146,7 +156,7 @@ def test_web_ui_and_ui_meta_exist() -> None:
     assert meta.status_code == 200
     body = meta.json()
     assert body["name"] == "codearts2api"
-    assert body["version"] == "0.4.0"
+    assert body["version"] == "0.5.0"
     assert body["api_base"] == "/v1"
     assert "api_key_enabled" in body
 
@@ -174,6 +184,26 @@ def test_web_ui_has_bilingual_i18n_assets() -> None:
     assert "window.codeartsI18n.tr" in app_js.text
 
 
+def test_account_pool_uses_compact_real_metrics_table() -> None:
+    client = TestClient(app)
+    root = client.get("/")
+    assert root.status_code == 200
+    for heading in ("Account", "Status", "Success / Failure", "Concurrency", "Usage", "Recent success", "Actions"):
+        assert f">{heading}<" in root.text
+    assert "account-table" in root.text
+
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert "account.stats?.request_count" in app_js.text
+    assert "account.stats?.avg_latency_ms" in app_js.text
+    assert "account.stats?.concurrency" in app_js.text
+    assert "account.health?.last_success_at" in app_js.text
+
+    i18n = client.get("/static/i18n.js")
+    assert "成功 / 失败" in i18n.text
+    assert '"Usage":"用量"' in i18n.text
+
+
 def test_ui_logs_are_sanitized() -> None:
     client = TestClient(app)
     client.get("/health")
@@ -197,6 +227,8 @@ def test_oauth_callback_returns_popup_completion_page(monkeypatch, tmp_path) -> 
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
     )
 
     async def fake_exchange(self, code, environment=None):
@@ -271,3 +303,28 @@ def test_web_ui_login_chooser_and_popup_flow_assets() -> None:
     assert 'location.href = body.authorize_url' not in app_js
     assert 'Use for API' not in app_js
     assert 'environmentSelect' not in app_js
+
+
+def test_usage_overview_ui_assets_exist() -> None:
+    client = TestClient(app)
+    root = client.get("/")
+    assert root.status_code == 200
+    for marker in (
+        'id="usageRange"',
+        'id="usageRequests"',
+        'id="usageTotalTokens"',
+        'id="officialQuotaPanel"',
+        'id="usageChart"',
+    ):
+        assert marker in root.text
+    assert ">Concurrency<" in root.text
+
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert "/api/ui/usage?days=" in app_js.text
+    assert "official_quota" in app_js.text
+    assert "account.stats?.concurrency" in app_js.text
+
+    i18n = client.get("/static/i18n.js")
+    assert '"Concurrency":"并发"' in i18n.text
+    assert '"Usage Overview":"用量总览"' in i18n.text

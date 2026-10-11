@@ -7,11 +7,13 @@ A local OpenAI-compatible gateway for Huawei CodeArts Agent APIs. It uses the us
 - local dark Web UI at `http://127.0.0.1:8000/`
 - multi-account pool containing both China and International CodeArts accounts
 - automatic account routing (`round_robin` or `random`)
+- health-aware failover with cooldown/backoff for recoverable account failures
 - optional explicit account selection with `X-CodeArts-Account`
 - `GET /health`
-- `GET /v1/models`
+- live `GET /v1/models` discovery from CodeArts builtin and third-party model APIs
 - `POST /v1/chat/completions`
 - streaming and non-streaming OpenAI-style responses
+- native multi-turn continuity using CodeArts `chat_id` + `parent_message_id`
 - Huawei `SDK-HMAC-SHA256` request signing
 - CodeArts OAuth Authorization Code + PKCE + ES256 DPoP login
 - rotating refresh-token renewal and lazy refresh before expiry
@@ -61,6 +63,43 @@ X-CodeArts-Account: <account-id>
 ```
 
 Account records are stored independently under `data/accounts/`, so refresh-token rotation for one account does not overwrite another account.
+
+### Health-aware routing and failover
+
+Transient network, timeout, and upstream `5xx` failures get one quick retry on the same account by default. If they still fail, or if the account returns `429` / `401/403`, the account is marked unhealthy and put into a temporary cooldown. If another usable account is available, the gateway retries the request with the next account automatically. Cooldown uses exponential backoff and the account's public health state is visible in the dashboard; credentials and response bodies are never exposed in that metadata.
+
+For streaming requests, failover is allowed only before the first response delta has been sent to the caller. Once output has started, the gateway keeps the same account so a retry cannot duplicate already streamed text.
+
+`X-CodeArts-Account` pins a request to one account and therefore intentionally disables cross-account failover for that request.
+
+## Live model discovery
+
+`GET /v1/models` queries the CodeArts model APIs with the selected account credentials and merges models available across usable accounts:
+
+```text
+GET /v1/model/builtin
+GET /api/v1/third-party/model/list?page_num=1&page_size=50
+```
+
+Results are cached for a short TTL. `GET /v1/models?refresh=true` forces a refresh. If model discovery is temporarily unavailable, the configured fallback model list remains available so OpenAI-compatible clients can still use `codearts-auto`.
+
+## Multi-turn conversations
+
+CodeArts chat history is continued with its native `chat_id` and `parent_message_id` chain. `codearts2api` stores only routing metadata plus SHA-256 hashes under `data/conversations/`; prompt and response text are not persisted there.
+
+You can explicitly reuse a conversation in either of these ways:
+
+```text
+X-CodeArts-Conversation: <conversation-id>
+```
+
+or add the compatible extension field:
+
+```json
+{"conversation_id":"<conversation-id>"}
+```
+
+The response includes the same `conversation_id` and also returns it in the `X-CodeArts-Conversation` header. Standard OpenAI clients that resend full message history can work without this extension: the gateway hashes the known history and automatically matches it to the existing CodeArts conversation, then sends only the newest user turn upstream.
 
 ## China and International profiles
 

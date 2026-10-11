@@ -84,7 +84,22 @@
               </div>
               <button class="button primary small" id="loginBtn">Add Account</button>
             </div>
-            <div class="account-list" id="accountList"></div>
+            <div class="account-table-wrap">
+              <table class="account-table">
+                <thead>
+                  <tr>
+                    <th>Account</th>
+                    <th>Status</th>
+                    <th>Success / Failure</th>
+                    <th>Concurrency</th>
+                    <th>Usage</th>
+                    <th>Recent success</th>
+                    <th class="account-actions-heading">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="accountList"></tbody>
+              </table>
+            </div>
             <div class="account-pool-note">
               <span>Requests are routed automatically across usable accounts.</span>
               <span class="pill neutral" id="routingPill">Round Robin</span>
@@ -130,6 +145,74 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
             <div><span>Local API Key</span><strong id="apiKeyState">—</strong><small>Gateway access protection</small></div>
           </article>
         </div>
+
+        <article class="card usage-overview-card">
+          <div class="card-head usage-head">
+            <div>
+              <div class="label">USAGE OVERVIEW</div>
+              <h2>Usage Overview</h2>
+            </div>
+            <div class="usage-controls">
+              <span class="muted" id="usageRangeMeta">Last 3 days · 30 points</span>
+              <select class="compact-select" id="usageRange" aria-label="Usage range">
+                <option value="1">Last 24 hours</option>
+                <option value="3" selected>Last 3 days</option>
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+              </select>
+              <button class="button ghost small" id="refreshUsageBtn">Refresh</button>
+            </div>
+          </div>
+
+          <div class="usage-metric-grid">
+            <div class="usage-metric-card accent-blue">
+              <span>Requests</span><strong id="usageRequests">0</strong><small id="usageRequestSub">0 failures</small>
+            </div>
+            <div class="usage-metric-card accent-purple">
+              <span>Total tokens</span><strong id="usageTotalTokens">0</strong><small id="usageTokenShare">prompt 0% · completion 0%</small>
+            </div>
+            <div class="usage-metric-card">
+              <span>Prompt</span><strong id="usagePromptTokens">0</strong><small id="usagePromptShare">0%</small>
+            </div>
+            <div class="usage-metric-card accent-green">
+              <span>Completion</span><strong id="usageCompletionTokens">0</strong><small id="usageCompletionShare">0%</small>
+            </div>
+            <div class="usage-metric-card accent-amber">
+              <span>Failed attempts</span><strong id="usageFailures">0</strong><small id="usageSuccessRate">100% success</small>
+            </div>
+            <div class="usage-metric-card">
+              <span>Average latency</span><strong id="usageLatency">—</strong><small id="usageThroughput">— tok/s</small>
+            </div>
+          </div>
+
+          <div class="official-quota-panel" id="officialQuotaPanel">
+            <div class="official-quota-copy">
+              <span class="quota-kicker">CODEARTS PACKAGE</span>
+              <strong id="officialQuotaTitle">Official quota unavailable</strong>
+              <small id="officialQuotaMeta">Package usage is read from CodeArts directly.</small>
+            </div>
+            <div class="quota-progress-wrap">
+              <div class="quota-progress"><span id="officialQuotaBar"></span></div>
+              <span id="officialQuotaPercent">—</span>
+            </div>
+          </div>
+
+          <div class="usage-chart-head">
+            <div>
+              <strong>Token timeline</strong>
+              <span id="usageChartMeta">30 points · peak 0 · average 0</span>
+            </div>
+            <div class="usage-legend" aria-hidden="true">
+              <span><i class="legend-dot prompt"></i>prompt</span>
+              <span><i class="legend-dot completion"></i>completion</span>
+              <span><i class="legend-line"></i>average</span>
+            </div>
+          </div>
+          <div class="usage-chart-wrap">
+            <canvas id="usageChart" height="260" aria-label="Token usage timeline"></canvas>
+            <div class="usage-chart-empty hidden" id="usageChartEmpty">No usage recorded in this range yet.</div>
+          </div>
+        </article>
 
         <div class="content-grid">
           <article class="card">
