@@ -492,6 +492,18 @@ def test_web_ui_login_chooser_and_popup_flow_assets() -> None:
     assert 'environmentSelect' not in app_js
 
 
+def test_dashboard_uses_adaptive_account_polling() -> None:
+    client = TestClient(app)
+    app_js = client.get("/static/app.js").text
+    assert "ACCOUNT_POLL_IDLE_MS = 10000" in app_js
+    assert "ACCOUNT_POLL_ACTIVE_MS = 1000" in app_js
+    assert "scheduleAccountPolling" in app_js
+    assert 'window.addEventListener("visibilitychange"' in app_js
+    assert "document.hidden" in app_js
+    assert "setInterval(checkOAuthCompletion, 1500)" in app_js
+    assert "}, 2500);" not in app_js
+
+
 def test_usage_overview_ui_assets_exist() -> None:
     client = TestClient(app)
     root = client.get("/")

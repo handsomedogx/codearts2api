@@ -26,6 +26,11 @@ const pageMeta = {
   settings: ["CONFIGURATION", "Settings"],
 };
 
+const ACCOUNT_POLL_IDLE_MS = 10000;
+const ACCOUNT_POLL_ACTIVE_MS = 1000;
+let accountPollTimer = null;
+let accountPollBusy = false;
+
 function authHeaders(json = false) {
   const headers = {};
   const key = state.access.apiKey || "";
@@ -322,6 +327,39 @@ async function loadAccounts() {
   } catch (error) {
     toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `获取账号池失败：${error.message}` : `Account pool failed: ${error.message}`), "error");
   }
+}
+
+function shouldPollAccounts() {
+  if (document.hidden) return false;
+  const oauthModalOpen = !$("loginModal").classList.contains("hidden");
+  if (oauthModalOpen && (state.oauth.status === "waiting" || state.oauth.status === "preparing")) return false;
+  return state.sending || $("view-dashboard").classList.contains("active");
+}
+
+function stopAccountPolling() {
+  if (accountPollTimer) clearTimeout(accountPollTimer);
+  accountPollTimer = null;
+}
+
+function scheduleAccountPolling(delay = null) {
+  stopAccountPolling();
+  if (!shouldPollAccounts()) return;
+  const wait = delay ?? (state.sending ? ACCOUNT_POLL_ACTIVE_MS : ACCOUNT_POLL_IDLE_MS);
+  accountPollTimer = setTimeout(async () => {
+    accountPollTimer = null;
+    if (!shouldPollAccounts()) return;
+    if (accountPollBusy) {
+      scheduleAccountPolling(250);
+      return;
+    }
+    accountPollBusy = true;
+    try {
+      await loadAccounts();
+    } finally {
+      accountPollBusy = false;
+      scheduleAccountPolling();
+    }
+  }, wait);
 }
 
 async function updateRouting() {
@@ -682,6 +720,7 @@ function navigate(view) {
   $("pageEyebrow").textContent = tr(eyebrow);
   $("pageTitle").textContent = tr(title);
   if (view === "logs") loadLogs();
+  scheduleAccountPolling(view === "dashboard" ? 0 : null);
 }
 
 function stopOAuthPolling() {
@@ -743,9 +782,11 @@ function closeLoginModal() {
   stopOAuthPolling();
   $("loginModal").classList.add("hidden");
   document.body.classList.remove("modal-open");
+  scheduleAccountPolling(0);
 }
 
 async function checkOAuthCompletion() {
+  if (document.hidden) return;
   if (!state.oauth.accountId || state.oauth.pollBusy || state.oauth.status === "success") return;
   state.oauth.pollBusy = true;
   try {
@@ -773,6 +814,7 @@ function completeOAuthWizard(account = null) {
   stopOAuthPolling();
   state.oauth.status = "success";
   renderOAuthWizard();
+  scheduleAccountPolling();
   const label = account?.user_name || shortId(account?.user_id || "") || environmentLabel(state.oauth.environment);
   toast(`${label} · ${tr("Login successful")}`, "success");
 }
@@ -933,6 +975,7 @@ async function sendPlayground() {
   messages.push({ role: "user", content: prompt });
 
   state.sending = true;
+  scheduleAccountPolling(0);
   state.responseText = "";
   state.lastError = "";
   const sendBtn = $("sendBtn");
@@ -987,6 +1030,7 @@ async function sendPlayground() {
     toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `对话失败：${error.message}` : `Chat failed: ${error.message}`), "error");
   } finally {
     state.sending = false;
+    scheduleAccountPolling();
     sendBtn.disabled = false;
     sendBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="m4 4 17 8-17 8 3-8-3-8Z"/><path d="M7 12h14"/></svg> ${tr("Send")}`;
   }
@@ -1110,11 +1154,18 @@ window.addEventListener("codearts2api:languagechange", () => {
 
 window.addEventListener("resize", () => { if (state.usage) renderUsageChart(state.usage); });
 
-window.codeartsI18n.setLanguage(window.codeartsI18n.getLanguage(), false);
-loadAll();
-setInterval(() => {
+window.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopAccountPolling();
+    return;
+  }
+  scheduleAccountPolling(0);
   if ($("view-logs").classList.contains("active")) loadLogs();
-}, 5000);
+  if (state.oauth.status === "waiting") checkOAuthCompletion();
+});
+
+window.codeartsI18n.setLanguage(window.codeartsI18n.getLanguage(), false);
+loadAll().finally(() => scheduleAccountPolling());
 setInterval(() => {
-  if ($("view-dashboard").classList.contains("active")) loadAccounts();
-}, 2500);
+  if (!document.hidden && $("view-logs").classList.contains("active")) loadLogs();
+}, 5000);
