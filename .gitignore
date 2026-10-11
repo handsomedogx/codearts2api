@@ -9,3 +9,4 @@ data/oauth_pending.json
 data/conversations/
 data/usage.jsonl
 data/request_logs.jsonl
+data/settings.json

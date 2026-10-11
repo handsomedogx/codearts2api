@@ -126,12 +126,6 @@ class Settings:
     usage_file: str = os.getenv("CODEARTS_USAGE_FILE", "data/usage.jsonl")
     request_logs_file: str = os.getenv("CODEARTS_REQUEST_LOGS_FILE", "data/request_logs.jsonl")
 
-    access_key_id: str = os.getenv("CODEARTS_ACCESS_KEY_ID", "")
-    secret_access_key: str = os.getenv("CODEARTS_SECRET_ACCESS_KEY", "")
-    security_token: str = os.getenv("CODEARTS_SECURITY_TOKEN", "")
-    domain_id: str = os.getenv("CODEARTS_DOMAIN_ID", "")
-    manual_credentials_environment: str = os.getenv("CODEARTS_MANUAL_CREDENTIAL_ENVIRONMENT", ENV_CN)
-
     default_model: str = os.getenv("CODEARTS_DEFAULT_MODEL", "codearts-auto")
     models: tuple[str, ...] = _split_csv(os.getenv("CODEARTS_MODELS", "codearts-auto"))
 
@@ -148,7 +142,7 @@ class Settings:
     pending_auth_file: str = os.getenv("CODEARTS_PENDING_AUTH_FILE", "data/oauth_pending.json")
     refresh_skew_seconds: int = int(os.getenv("CODEARTS_REFRESH_SKEW_SECONDS", "120"))
 
-    api_key: str = os.getenv("CODEARTS2API_API_KEY", "")
+    gateway_settings_file: str = os.getenv("CODEARTS2API_SETTINGS_FILE", "data/settings.json")
     host: str = os.getenv("CODEARTS2API_HOST", "127.0.0.1")
     port: int = int(os.getenv("CODEARTS2API_PORT", "8000"))
 
@@ -232,16 +226,6 @@ class Settings:
     @property
     def login_success_url(self) -> str:
         return self.login_success_url_for(self._normalize_or_default(self.default_environment))
-
-    def env_credentials_ready_for(self, environment: str) -> bool:
-        selected = normalize_environment(environment)
-        manual_environment = self._normalize_or_default(self.manual_credentials_environment)
-        return bool(self.access_key_id and self.secret_access_key and selected == manual_environment)
-
-    @property
-    def env_credentials_ready(self) -> bool:
-        return self.env_credentials_ready_for(self._normalize_or_default(self.default_environment))
-
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

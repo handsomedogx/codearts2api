@@ -1,6 +1,6 @@
 [project]
 name = "codearts2api"
-version = "0.7.0"
+version = "0.8.0"
 description = "OpenAI-compatible API gateway for Huawei CodeArts Agent using legitimate Huawei Cloud credentials."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -388,3 +388,10 @@ body.modal-open { overflow: hidden; }
 .log-number-cell { text-align:right; color:#d2d5dc; }
 .log-request-id { color:#697181; font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; }
 @media (max-width: 760px) { .request-log-head { flex-direction:column; } .request-log-head-meta { white-space:normal; flex-wrap:wrap; } .request-log-toolbar { flex-wrap:wrap; } .request-log-search { max-width:none; min-width:100%; } }
+
+/* API access settings */
+.mono-input { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+.access-key-label { margin-top: 14px; }
+.button.danger-soft { border-color: #5b3439; background: #25171a; color: #ff9aa5; }
+.button.danger-soft:hover { background: #321d21; border-color: #7a454c; }
+.button:disabled { opacity: .45; cursor: not-allowed; }

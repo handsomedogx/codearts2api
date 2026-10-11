@@ -19,7 +19,6 @@ A local OpenAI-compatible gateway for Huawei CodeArts Agent APIs. It uses the us
 - CodeArts OAuth Authorization Code + PKCE + ES256 DPoP login
 - rotating refresh-token renewal and lazy refresh before expiry
 - persistent sanitized request logs with search/filter/summary and bilingual Web UI
-- optional manual temporary-credential fallback
 
 ## Install and run
 
@@ -35,10 +34,35 @@ Then open:
 http://127.0.0.1:8000/
 ```
 
-OpenAI-compatible base URL:
+First-use flow:
+
+1. click **Add Account** and finish the China or International CodeArts OAuth login;
+2. open **Settings → External client access**;
+3. copy the generated **Base URL** and **API Key** into an OpenAI-compatible client.
+
+Typical local client configuration:
 
 ```text
-http://127.0.0.1:8000/v1
+Base URL  http://127.0.0.1:8000/v1
+API Key   sk-ca-...
+Model     GLM-5.2 (or codearts-auto)
+```
+
+Python example:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key="sk-ca-...",
+)
+
+reply = client.chat.completions.create(
+    model="GLM-5.2",
+    messages=[{"role": "user", "content": "hello"}],
+)
+print(reply.choices[0].message.content)
 ```
 
 ## Account pool
@@ -168,32 +192,32 @@ The JSONL path can be changed with `CODEARTS_REQUEST_LOGS_FILE`.
 
 CodeArts refresh tokens rotate. Each account is refreshed independently and rewritten atomically. Chat requests lazily refresh the selected account shortly before its credentials expire.
 
-## Manual credential fallback
+## API access and configuration
 
-If OAuth cannot be used, copy `.env.example` to `.env` and fill:
+The normal setup does **not** require editing `.env`. On first start, `codearts2api` automatically generates a gateway API key and stores it in the Git-ignored `data/settings.json`. The same key is reused across restarts.
 
-```text
-CODEARTS_ACCESS_KEY_ID=
-CODEARTS_SECRET_ACCESS_KEY=
-CODEARTS_SECURITY_TOKEN=
-CODEARTS_DOMAIN_ID=
-```
+The local Dashboard exposes the full Base URL and API key under **Settings → External client access**. The management endpoints that can reveal or rotate the key accept only loopback connections; remote clients cannot read the key from the gateway.
 
-Manual credentials are scoped to one site with `CODEARTS_MANUAL_CREDENTIAL_ENVIRONMENT=cn` (or `international`) and are used only as a fallback when the account pool has no usable account.
-
-## Local API protection
-
-For anything beyond localhost-only development, set:
+OpenAI-compatible clients send:
 
 ```text
-CODEARTS2API_API_KEY=your-local-gateway-key
+Authorization: Bearer <codearts2api API key>
 ```
 
-Then clients must send:
+Click **Regenerate** in Settings to rotate the generated key. The previous key becomes invalid immediately.
+
+`.env.example` intentionally contains only deployment-level host/port settings:
 
 ```text
-Authorization: Bearer your-local-gateway-key
+CODEARTS2API_HOST=127.0.0.1
+CODEARTS2API_PORT=8000
 ```
+
+To serve another device on the LAN, intentionally bind `CODEARTS2API_HOST=0.0.0.0`, allow the port in the firewall, and use the machine's LAN address as the Base URL. Keep Dashboard management local to the server. For public deployments, put HTTPS/reverse-proxy access control in front of the gateway instead of exposing the development port directly.
+
+Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. When that override is present it replaces the generated key and Dashboard regeneration is disabled. CodeArts service endpoints, OAuth metadata, retry/cooldown values and storage paths also retain environment-variable overrides in `app/config.py`, but they are advanced tuning knobs and are deliberately omitted from the normal `.env.example`.
+
+There is no manual AK/SK credential fallback: CodeArts credentials enter the pool only through the supported OAuth account flow.
 
 ## Tests
 

@@ -19,6 +19,7 @@ def _settings(tmp_path) -> Settings:
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
+        gateway_settings_file=str(tmp_path / "settings.json"),
     )
 
 
@@ -236,9 +237,10 @@ def test_explicit_account_header_routes_by_account_environment(monkeypatch, tmp_
     app.dependency_overrides[get_settings] = lambda: settings
     try:
         client = TestClient(app)
+        api_key = client.get("/api/ui/access").json()["api_key"]
         response = client.post(
             "/v1/chat/completions",
-            headers={"X-CodeArts-Account": "intl-a"},
+            headers={"Authorization": f"Bearer {api_key}", "X-CodeArts-Account": "intl-a"},
             json={"model": "codearts-auto", "messages": [{"role": "user", "content": "hello"}]},
         )
         assert response.status_code == 200

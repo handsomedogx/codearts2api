@@ -403,31 +403,6 @@ class AuthManager:
             refreshed = self.pool.get(selected_id) or record
             candidates.append((self.pool.public(refreshed), credentials))
 
-        if candidates or account_id:
-            return candidates
-
-        for environment in ("cn", "international"):
-            if self.settings.env_credentials_ready_for(environment):
-                credentials = ActiveCredentials(
-                    access_key_id=self.settings.access_key_id,
-                    secret_access_key=self.settings.secret_access_key,
-                    security_token=self.settings.security_token,
-                    domain_id=self.settings.domain_id,
-                    source="env",
-                )
-                candidates.append(({
-                    "id": f"manual-{environment}",
-                    "environment": environment,
-                    "environment_label": self.settings.profile(environment).label,
-                    "authenticated": True,
-                    "source": "env",
-                    "expires_at": "",
-                    "refresh_available": False,
-                    "user_id": "",
-                    "user_name": "",
-                    "domain_id": self.settings.domain_id,
-                    "health": {"status": "healthy"},
-                }, credentials))
         return candidates
 
     async def choose_account(self, account_id: str | None = None, *, model: str = "") -> tuple[dict[str, Any], ActiveCredentials] | None:

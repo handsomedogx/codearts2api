@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+from app.codearts.auth import AuthManager
 from app.codearts.client import CodeArtsClient
 from app.config import Settings, get_settings
 from app.main import app
+
+
+def _api_auth(client: TestClient) -> dict[str, str]:
+    response = client.get("/api/ui/access")
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['api_key']}"}
 
 
 def test_health_and_models_exist(tmp_path) -> None:
@@ -15,6 +24,7 @@ def test_health_and_models_exist(tmp_path) -> None:
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
         request_logs_file=str(tmp_path / "requests.jsonl"),
+            gateway_settings_file=str(tmp_path / "settings.json"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -23,7 +33,7 @@ def test_health_and_models_exist(tmp_path) -> None:
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
 
-        models = client.get("/v1/models")
+        models = client.get("/v1/models", headers=_api_auth(client))
         assert models.status_code == 200
         assert models.json()["object"] == "list"
         assert models.json()["data"][0]["id"] == "codearts-auto"
@@ -33,20 +43,20 @@ def test_health_and_models_exist(tmp_path) -> None:
 
 def test_chat_requires_credentials(tmp_path) -> None:
     settings = Settings(
-        access_key_id="",
-        secret_access_key="",
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
         request_logs_file=str(tmp_path / "requests.jsonl"),
+            gateway_settings_file=str(tmp_path / "settings.json"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
         client = TestClient(app)
         response = client.post(
             "/v1/chat/completions",
+            headers=_api_auth(client),
             json={"model": "codearts-auto", "messages": [{"role": "user", "content": "hello"}]},
         )
         assert response.status_code == 503
@@ -59,17 +69,29 @@ def test_chat_requires_credentials(tmp_path) -> None:
 
 
 def _credentialed_settings(tmp_path) -> Settings:
-    return Settings(
-        access_key_id="fake-ak",
-        secret_access_key="fake-sk",
-        security_token="fake-token",
+    settings = Settings(
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
         request_logs_file=str(tmp_path / "requests.jsonl"),
+        gateway_settings_file=str(tmp_path / "settings.json"),
     )
+    AuthManager(settings).pool.save(
+        {
+            "id": "test-account",
+            "environment": "cn",
+            "access_key_id": "fake-ak",
+            "secret_access_key": "fake-sk",
+            "security_token": "fake-token",
+            "expiration": "2099-01-01T00:00:00Z",
+            "refresh_token": "",
+            "user_name": "test-account",
+        },
+        "test-account",
+    )
+    return settings
 
 
 def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
@@ -85,7 +107,7 @@ def test_non_streaming_openai_translation(monkeypatch, tmp_path) -> None:
         client = TestClient(app)
         response = client.post(
             "/v1/chat/completions",
-            headers={"X-Forwarded-For": "198.51.100.9, 10.0.0.1", "User-Agent": "deepseek-harness/test"},
+            headers={**_api_auth(client), "X-Forwarded-For": "198.51.100.9, 10.0.0.1", "User-Agent": "deepseek-harness/test"},
             json={"model": "codearts-auto", "messages": [{"role": "user", "content": "hello"}]},
         )
         assert response.status_code == 200
@@ -120,6 +142,7 @@ def test_streaming_openai_translation(monkeypatch, tmp_path) -> None:
         with client.stream(
             "POST",
             "/v1/chat/completions",
+            headers=_api_auth(client),
             json={"model": "codearts-auto", "stream": True, "messages": [{"role": "user", "content": "hello"}]},
         ) as response:
             text = "".join(response.iter_text())
@@ -140,14 +163,13 @@ def test_streaming_openai_translation(monkeypatch, tmp_path) -> None:
 def test_auth_endpoints_do_not_expose_secrets(tmp_path) -> None:
     settings = Settings(
         port=8123,
-        access_key_id="",
-        secret_access_key="",
         pending_auth_file=str(tmp_path / "pending.json"),
         accounts_dir=str(tmp_path / "accounts"),
         routing_file=str(tmp_path / "routing.json"),
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
         request_logs_file=str(tmp_path / "requests.jsonl"),
+            gateway_settings_file=str(tmp_path / "settings.json"),
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
@@ -180,7 +202,7 @@ def test_web_ui_and_ui_meta_exist() -> None:
     assert meta.status_code == 200
     body = meta.json()
     assert body["name"] == "codearts2api"
-    assert body["version"] == "0.7.0"
+    assert body["version"] == "0.8.0"
     assert body["api_base"] == "/v1"
     assert "api_key_enabled" in body
 
@@ -206,6 +228,29 @@ def test_web_ui_has_bilingual_i18n_assets() -> None:
     assert app_js.status_code == 200
     assert "codearts2api:languagechange" in app_js.text
     assert "window.codeartsI18n.tr" in app_js.text
+    assert "/api/ui/access" in app_js.text
+    assert "codearts2api.apiKey" not in app_js.text
+    assert 'id="gatewayBaseUrl"' in root.text
+    assert 'id="gatewayApiKey"' in root.text
+    assert 'id="regenerateApiKeyBtn"' in root.text
+    assert 'id="localApiKey"' not in root.text
+
+
+def test_env_example_contains_only_normal_deployment_settings() -> None:
+    text = Path(".env.example").read_text(encoding="utf-8")
+    assert "CODEARTS2API_HOST=" in text
+    assert "CODEARTS2API_PORT=" in text
+    for obsolete in (
+        "CODEARTS_ACCESS_KEY_ID",
+        "CODEARTS_SECRET_ACCESS_KEY",
+        "CODEARTS_SECURITY_TOKEN",
+        "CODEARTS_DOMAIN_ID",
+        "CODEARTS_MANUAL_CREDENTIAL_ENVIRONMENT",
+        "CODEARTS_CN_BASE_URL",
+        "CODEARTS_RETRY_BUDGET",
+    ):
+        assert obsolete not in text
+
 
 
 def test_account_pool_uses_compact_real_metrics_table() -> None:
@@ -252,6 +297,7 @@ def test_ui_logs_are_sanitized(tmp_path) -> None:
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
         request_logs_file=str(tmp_path / "requests.jsonl"),
+            gateway_settings_file=str(tmp_path / "settings.json"),
     )
     store = get_request_log_store(settings)
     started = store.begin()
@@ -302,6 +348,58 @@ def test_request_log_filters_and_summary(tmp_path) -> None:
     assert store.query(time_range="all", result="failure")["items"][0]["model"] == "GLM-5.1"
     assert store.query(time_range="all", q="user-a")["items"][0]["account_id"] == "a"
 
+def test_generated_api_key_persists_and_rotation_invalidates_old_key(tmp_path) -> None:
+    settings = Settings(
+        pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
+        gateway_settings_file=str(tmp_path / "settings.json"),
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        client = TestClient(app)
+        first = client.get("/api/ui/access")
+        assert first.status_code == 200
+        first_body = first.json()
+        first_key = first_body["api_key"]
+        assert first_key.startswith("sk-ca-")
+        assert first_body["regeneratable"] is True
+        assert first_body["source"] == "generated"
+        assert Path(settings.gateway_settings_file).exists()
+
+        second = client.get("/api/ui/access")
+        assert second.json()["api_key"] == first_key
+        assert client.get("/v1/models").status_code == 401
+        assert client.get("/v1/models", headers={"Authorization": f"Bearer {first_key}"}).status_code == 200
+
+        rotated = client.post("/api/ui/access/regenerate")
+        assert rotated.status_code == 200
+        new_key = rotated.json()["api_key"]
+        assert new_key.startswith("sk-ca-")
+        assert new_key != first_key
+        assert client.get("/v1/models", headers={"Authorization": f"Bearer {first_key}"}).status_code == 401
+        assert client.get("/v1/models", headers={"Authorization": f"Bearer {new_key}"}).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_dashboard_secret_access_is_loopback_only(tmp_path) -> None:
+    settings = Settings(gateway_settings_file=str(tmp_path / "settings.json"))
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        remote = TestClient(app, client=("203.0.113.20", 50000))
+        assert remote.get("/api/ui/access").status_code == 403
+        assert remote.get("/api/ui/accounts").status_code == 403
+
+        local = TestClient(app, client=("127.0.0.1", 50001))
+        assert local.get("/api/ui/access").status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_oauth_callback_returns_popup_completion_page(monkeypatch, tmp_path) -> None:
     from app.codearts.auth import AuthManager
 
@@ -313,6 +411,7 @@ def test_oauth_callback_returns_popup_completion_page(monkeypatch, tmp_path) -> 
         conversations_dir=str(tmp_path / "conversations"),
         usage_file=str(tmp_path / "usage.jsonl"),
         request_logs_file=str(tmp_path / "requests.jsonl"),
+            gateway_settings_file=str(tmp_path / "settings.json"),
     )
 
     async def fake_exchange(self, code, environment=None):

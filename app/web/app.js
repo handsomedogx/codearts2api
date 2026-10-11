@@ -3,6 +3,7 @@ const tr = (text, vars = {}) => window.codeartsI18n.tr(text, vars);
 
 const state = {
   meta: null,
+  access: { apiKey: "", baseUrl: "", source: "", regeneratable: false },
   accounts: [],
   routing: { strategy: "round_robin" },
   models: [],
@@ -25,13 +26,9 @@ const pageMeta = {
   settings: ["CONFIGURATION", "Settings"],
 };
 
-function getLocalKey() {
-  return localStorage.getItem("codearts2api.apiKey") || "";
-}
-
 function authHeaders(json = false) {
   const headers = {};
-  const key = getLocalKey();
+  const key = state.access.apiKey || "";
   if (key) headers.Authorization = `Bearer ${key}`;
   if (json) headers["Content-Type"] = "application/json";
   return headers;
@@ -42,9 +39,6 @@ async function apiFetch(path, options = {}) {
     ...options,
     headers: { ...authHeaders(Boolean(options.body)), ...(options.headers || {}) },
   });
-  if (response.status === 401) {
-    $("apiKeyBanner").classList.remove("hidden");
-  }
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
@@ -79,18 +73,16 @@ function shortId(value) {
 }
 
 function absoluteBaseUrl() {
-  return `${location.origin}/v1`;
+  return state.access.baseUrl || `${location.origin}/v1`;
 }
 
 function updateSnippets() {
   const base = absoluteBaseUrl();
   $("apiBaseUrl").textContent = base;
   $("configBase").textContent = base;
-  const protectedApi = Boolean(state.meta?.api_key_enabled);
-  $("pythonSnippet").textContent = protectedApi
-    ? `from openai import OpenAI\nclient = OpenAI(base_url="${base}", api_key="YOUR_LOCAL_API_KEY")`
-    : `from openai import OpenAI\nclient = OpenAI(base_url="${base}", api_key="local")`;
-  $("configAuth").textContent = protectedApi ? "Bearer <local API key>" : (window.codeartsI18n.getLanguage() === "zh-CN" ? "无（仅本机）" : "None (localhost)");
+  const key = state.access.apiKey || "YOUR_CODEARTS2API_KEY";
+  $("pythonSnippet").textContent = `from openai import OpenAI\nclient = OpenAI(base_url="${base}", api_key="${key}")`;
+  $("configAuth").textContent = "Bearer <codearts2api API key>";
 }
 
 
@@ -110,10 +102,8 @@ async function loadMeta() {
     $("versionText").textContent = `v${state.meta.version}`;
     $("settingsVersion").textContent = state.meta.version;
     $("settingsCallback").textContent = state.meta.callback_url;
-    $("apiKeyState").textContent = state.meta.api_key_enabled ? tr("Enabled") : tr("Disabled");
-    $("apiKeyBanner").classList.toggle("hidden", !(state.meta.api_key_enabled && !getLocalKey()));
+    $("apiKeyState").textContent = tr("Enabled");
     updateSnippets();
-    updateApiKeySettings();
   } catch (error) {
     setRuntime(false);
     toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `获取网关信息失败：${error.message}` : `Gateway metadata failed: ${error.message}`), "error");
@@ -329,13 +319,7 @@ async function loadAccounts() {
     state.accounts = body.items || [];
     state.routing = body.routing || { strategy: "round_robin" };
     renderAccounts();
-    $("apiKeyBanner").classList.add("hidden");
   } catch (error) {
-    if (String(error.message).includes("401")) {
-      state.accounts = [];
-      renderAccounts();
-      return;
-    }
     toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `获取账号池失败：${error.message}` : `Account pool failed: ${error.message}`), "error");
   }
 }
@@ -687,7 +671,7 @@ async function loadLogs() {
 }
 
 async function loadAll() {
-  await loadMeta();
+  await Promise.all([loadMeta(), loadAccess()]);
   await Promise.all([loadAccounts(), loadModels(), loadLogs(), loadUsage(false)]);
 }
 
@@ -861,33 +845,48 @@ async function deleteAccount(accountId) {
   }
 }
 
-function updateApiKeySettings() {
-  const key = getLocalKey();
-  $("localApiKey").value = key;
-  if (!state.meta?.api_key_enabled) {
-    $("apiKeySettingStatus").textContent = tr("Server-side API key protection is disabled.");
-  } else if (key) {
-    $("apiKeySettingStatus").textContent = tr("A key is stored in this browser.");
-  } else {
-    $("apiKeySettingStatus").textContent = tr("Server requires a key; none is stored in this browser.");
+function renderAccessSettings() {
+  $("gatewayBaseUrl").value = state.access.baseUrl || absoluteBaseUrl();
+  $("gatewayApiKey").value = state.access.apiKey || "";
+  $("regenerateApiKeyBtn").disabled = !state.access.regeneratable;
+  $("gatewayAccessStatus").textContent = state.access.source === "environment"
+    ? tr("API key is managed by an environment override. Regeneration is disabled.")
+    : tr("API key was generated automatically and is stored only on this machine.");
+  updateSnippets();
+}
+
+async function loadAccess() {
+  try {
+    const body = await apiFetch("/api/ui/access");
+    state.access = {
+      apiKey: body.api_key || "",
+      baseUrl: body.base_url || `${location.origin}/v1`,
+      source: body.source || "generated",
+      regeneratable: Boolean(body.regeneratable),
+    };
+    renderAccessSettings();
+  } catch (error) {
+    toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `获取 API 访问配置失败：${error.message}` : `API access settings failed: ${error.message}`), "error");
   }
 }
 
-async function saveApiKey() {
-  const key = $("localApiKey").value.trim();
-  if (key) localStorage.setItem("codearts2api.apiKey", key);
-  else localStorage.removeItem("codearts2api.apiKey");
-  updateApiKeySettings();
-  await Promise.all([loadAccounts(), loadModels(), loadLogs(), loadUsage(false)]);
-  toast(tr("Local API key saved"), "success");
-}
-
-async function clearApiKey() {
-  localStorage.removeItem("codearts2api.apiKey");
-  $("localApiKey").value = "";
-  updateApiKeySettings();
-  if (state.meta?.api_key_enabled) $("apiKeyBanner").classList.remove("hidden");
-  toast(tr("Browser API key cleared"));
+async function regenerateApiKey() {
+  if (!state.access.regeneratable) return;
+  const zh = window.codeartsI18n.getLanguage() === "zh-CN";
+  if (!window.confirm(zh ? "重新生成后，旧 API Key 会立即失效。继续吗？" : "Regenerating immediately invalidates the old API key. Continue?")) return;
+  try {
+    const body = await apiFetch("/api/ui/access/regenerate", { method: "POST" });
+    state.access = {
+      apiKey: body.api_key || "",
+      baseUrl: body.base_url || `${location.origin}/v1`,
+      source: body.source || "generated",
+      regeneratable: Boolean(body.regeneratable),
+    };
+    renderAccessSettings();
+    toast(tr("API key regenerated"), "success");
+  } catch (error) {
+    toast((zh ? `重新生成失败：${error.message}` : `Regenerate failed: ${error.message}`), "error");
+  }
 }
 
 function streamLabel(text) {
@@ -1039,8 +1038,9 @@ $("usageRange").addEventListener("change", () => {
   state.usageDays = Number($("usageRange").value || 3);
   loadUsage(false);
 });
-$("saveApiKeyBtn").addEventListener("click", saveApiKey);
-$("clearApiKeyBtn").addEventListener("click", clearApiKey);
+$("copyGatewayBaseUrlBtn").addEventListener("click", () => copyText(state.access.baseUrl || absoluteBaseUrl(), tr("Copied")));
+$("copyGatewayApiKeyBtn").addEventListener("click", () => copyText(state.access.apiKey || "", tr("Copied")));
+$("regenerateApiKeyBtn").addEventListener("click", regenerateApiKey);
 $("sendBtn").addEventListener("click", sendPlayground);
 $("copyResponseBtn").addEventListener("click", () => copyText(state.responseText || $("responseOutput").textContent));
 $("copyPythonBtn").addEventListener("click", () => copyText($("pythonSnippet").textContent));
@@ -1092,7 +1092,7 @@ window.addEventListener("codearts2api:languagechange", () => {
   if (state.meta) {
     $("apiKeyState").textContent = state.meta.api_key_enabled ? tr("Enabled") : tr("Disabled");
     updateSnippets();
-    updateApiKeySettings();
+    renderAccessSettings();
   }
   renderAccounts();
   renderOAuthWizard();

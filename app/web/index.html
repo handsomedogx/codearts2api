@@ -66,14 +66,6 @@
         </div>
       </header>
 
-      <div id="apiKeyBanner" class="banner hidden">
-        <div>
-          <strong>Local API Key is enabled</strong>
-          <span>Enter the local gateway API key to read account status and call models.</span>
-        </div>
-        <button class="button ghost small" data-goto="settings">Configure</button>
-      </div>
-
       <section class="view active" id="view-dashboard">
         <div class="hero-grid">
           <article class="card account-card">
@@ -142,7 +134,7 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
           </article>
           <article class="metric-card">
             <div class="metric-icon amber"><svg viewBox="0 0 24 24"><path d="M12 3v18M8 7h6.5a3 3 0 0 1 0 6H9.5a3 3 0 0 0 0 6H16"/></svg></div>
-            <div><span>Local API Key</span><strong id="apiKeyState">—</strong><small>Gateway access protection</small></div>
+            <div><span>API Key</span><strong id="apiKeyState">—</strong><small>Gateway access protection</small></div>
           </article>
         </div>
 
@@ -309,15 +301,20 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
       <section class="view" id="view-settings">
         <div class="settings-grid">
           <article class="card">
-            <div class="card-head"><div><div class="label">SECURITY</div><h2>Local API Key</h2></div></div>
-            <p class="muted" id="apiKeyHelp">If <code>CODEARTS2API_API_KEY</code> is configured in <code>.env</code>, enter the same key here. It is stored only in this browser's localStorage.</p>
-            <label class="field-label" for="localApiKey">API Key</label>
+            <div class="card-head"><div><div class="label">API ACCESS</div><h2>External client access</h2></div></div>
+            <p class="muted">Copy these values into any OpenAI-compatible client. The API key is generated automatically on first start.</p>
+            <label class="field-label" for="gatewayBaseUrl">Base URL</label>
             <div class="input-row">
-              <input class="input" id="localApiKey" type="password" autocomplete="off" placeholder="sk-local-…" />
-              <button class="button primary" id="saveApiKeyBtn">Save</button>
-              <button class="button ghost" id="clearApiKeyBtn">Clear</button>
+              <input class="input mono-input" id="gatewayBaseUrl" type="text" readonly />
+              <button class="button ghost" id="copyGatewayBaseUrlBtn">Copy</button>
             </div>
-            <div class="setting-status" id="apiKeySettingStatus">Not configured in browser.</div>
+            <label class="field-label access-key-label" for="gatewayApiKey">API Key</label>
+            <div class="input-row">
+              <input class="input mono-input" id="gatewayApiKey" type="text" readonly />
+              <button class="button ghost" id="copyGatewayApiKeyBtn">Copy</button>
+              <button class="button danger-soft" id="regenerateApiKeyBtn">Regenerate</button>
+            </div>
+            <div class="setting-status" id="gatewayAccessStatus">Loading API access…</div>
           </article>
           <article class="card">
             <div class="card-head"><div><div class="label">SYSTEM</div><h2>Gateway details</h2></div></div>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import time
 import uuid
@@ -21,14 +22,17 @@ from app.codearts.request_logs import get_request_log_store
 from app.codearts.subscription import get_subscription_catalog
 from app.codearts.usage import get_usage_store
 from app.config import Settings, get_settings, normalize_environment
+from app.gateway_settings import get_gateway_settings_store
 from app.models import ChatCompletionRequest
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI):
-    service = KeepaliveService(get_settings(), get_auth_manager())
+    settings = get_settings()
+    get_gateway_settings_store(settings).ensure_api_key()
+    service = KeepaliveService(settings, get_auth_manager())
     service.start()
     try:
         yield
@@ -44,11 +48,23 @@ def require_local_api_key(
     authorization: str | None = Header(default=None),
     settings: Settings = Depends(get_settings),
 ) -> None:
-    if not settings.api_key:
-        return
-    expected = f"Bearer {settings.api_key}"
-    if authorization != expected:
+    candidate = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        candidate = authorization[7:].strip()
+    if not get_gateway_settings_store(settings).verify(candidate):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def require_loopback_admin(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if host in {"localhost", "testclient"}:
+        return
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise HTTPException(status_code=403, detail="Dashboard management APIs are available only from this machine")
 
 
 def get_request_auth_manager(settings: Settings = Depends(get_settings)) -> AuthManager:
@@ -67,7 +83,7 @@ def _source_ip(request: Request) -> str:
 
 
 def _account_log_name(auth: AuthManager, account_id: str) -> str:
-    if not account_id or account_id.startswith("manual-"):
+    if not account_id:
         return ""
     record = auth.pool.get(account_id)
     if not record:
@@ -174,24 +190,45 @@ async def web_ui():
     return FileResponse(WEB_DIR / "index.html")
 
 
-@app.get("/api/ui/meta", include_in_schema=False)
+@app.get("/api/ui/meta", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_meta(settings: Settings = Depends(get_settings)) -> dict:
     return {
         "name": "codearts2api",
         "version": APP_VERSION,
         "api_base": "/v1",
-        "api_key_enabled": bool(settings.api_key),
+        "api_key_enabled": True,
         "environments": settings.public_environments(),
         "callback_url": settings.callback_url,
     }
 
 
-@app.get("/api/ui/accounts", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.get("/api/ui/access", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
+async def ui_access(request: Request, settings: Settings = Depends(get_settings)) -> dict:
+    access = get_gateway_settings_store(settings).ensure_api_key()
+    return {
+        **access,
+        "base_url": f"{str(request.base_url).rstrip('/')}/v1",
+    }
+
+
+@app.post("/api/ui/access/regenerate", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
+async def ui_access_regenerate(request: Request, settings: Settings = Depends(get_settings)) -> dict:
+    try:
+        access = get_gateway_settings_store(settings).regenerate_api_key()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        **access,
+        "base_url": f"{str(request.base_url).rstrip('/')}/v1",
+    }
+
+
+@app.get("/api/ui/accounts", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_accounts(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
     return {"items": auth.list_accounts(), "routing": auth.pool.routing()}
 
 
-@app.post("/api/ui/accounts/{account_id}/refresh", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.post("/api/ui/accounts/{account_id}/refresh", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_account_refresh(account_id: str, auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
     try:
         return await auth.refresh_account(account_id, force=True)
@@ -199,14 +236,14 @@ async def ui_account_refresh(account_id: str, auth: AuthManager = Depends(get_re
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.delete("/api/ui/accounts/{account_id}", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.delete("/api/ui/accounts/{account_id}", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_account_delete(account_id: str, auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
     if not auth.delete_account(account_id):
         raise HTTPException(status_code=404, detail="CodeArts account not found")
     return {"deleted": True, "account_id": account_id}
 
 
-@app.post("/api/ui/accounts/{account_id}/probe", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.post("/api/ui/accounts/{account_id}/probe", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_account_probe(account_id: str, auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
     try:
         return await auth.probe_account(account_id)
@@ -214,17 +251,17 @@ async def ui_account_probe(account_id: str, auth: AuthManager = Depends(get_requ
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/ui/accounts/probe", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.post("/api/ui/accounts/probe", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_accounts_probe(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
     return {"items": await auth.probe_accounts(due_only=False)}
 
 
-@app.get("/api/ui/routing", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.get("/api/ui/routing", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_routing(auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
     return auth.pool.routing()
 
 
-@app.post("/api/ui/routing", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.post("/api/ui/routing", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_routing_update(payload: dict = Body(...), auth: AuthManager = Depends(get_request_auth_manager)) -> dict:
     try:
         return auth.pool.set_routing(str(payload.get("strategy", "")))
@@ -232,7 +269,7 @@ async def ui_routing_update(payload: dict = Body(...), auth: AuthManager = Depen
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/api/ui/logs", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.get("/api/ui/logs", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_logs(
     q: str = Query(default="", max_length=200),
     result: str = Query(default="all"),
@@ -243,7 +280,7 @@ async def ui_logs(
     return get_request_log_store(settings).query(q=q, result=result, time_range=time_range, limit=limit)
 
 
-@app.get("/api/ui/usage", dependencies=[Depends(require_local_api_key)], include_in_schema=False)
+@app.get("/api/ui/usage", dependencies=[Depends(require_loopback_admin)], include_in_schema=False)
 async def ui_usage(
     days: int = Query(default=3, ge=1, le=90),
     refresh_quota: bool = Query(default=False),
@@ -261,16 +298,15 @@ async def health(
     auth: AuthManager = Depends(get_request_auth_manager),
 ) -> dict:
     accounts = auth.list_accounts()
-    manual_ready = any(settings.env_credentials_ready_for(environment) for environment in ("cn", "international"))
     return {
         "status": "ok",
-        "credentials_configured": any(item.get("authenticated") for item in accounts) or manual_ready,
+        "credentials_configured": any(item.get("authenticated") for item in accounts),
         "account_count": len(accounts),
         "routing_strategy": auth.pool.routing()["strategy"],
     }
 
 
-@app.get("/auth/login", dependencies=[Depends(require_local_api_key)])
+@app.get("/auth/login", dependencies=[Depends(require_loopback_admin)])
 async def auth_login(
     environment: str | None = Query(default=None),
     settings: Settings = Depends(get_settings),
@@ -280,7 +316,7 @@ async def auth_login(
     return RedirectResponse(auth.begin_login(selected), status_code=307)
 
 
-@app.get("/auth/login-url", dependencies=[Depends(require_local_api_key)])
+@app.get("/auth/login-url", dependencies=[Depends(require_loopback_admin)])
 async def auth_login_url(
     environment: str | None = Query(default=None),
     settings: Settings = Depends(get_settings),
