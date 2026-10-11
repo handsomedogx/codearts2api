@@ -74,10 +74,14 @@ class CodeArtsGateway:
         # Client/request-shape errors must not poison account/model health.
         if not exc.retryable and exc.status_code not in {401, 403}:
             return
-        # Authentication/credential/network failures describe the account or transport.
-        # Model/rate/server failures are scoped to account+model so other models remain usable.
+        # Transport jitter is request-scoped: record it in runtime/request stats, but do not
+        # make a healthy account unavailable to subsequent requests.
+        if exc.category in {"network", "timeout"}:
+            return
+        # Authentication/credential failures describe the whole account. Model/rate/server
+        # failures are scoped to account+model so other models remain usable.
         if exc.status_code in {401, 403} or exc.category in {
-            "auth", "credential_refresh", "credentials_unavailable", "network",
+            "auth", "credential_refresh", "credentials_unavailable",
         }:
             self.auth.pool.mark_failure(
                 account_id,
@@ -164,6 +168,26 @@ class CodeArtsGateway:
         )
         max_accounts = max(1, self.settings.routing_max_attempts)
         return candidates[:max_accounts]
+
+    async def prepare_stream_candidates(
+        self,
+        *,
+        explicit_account_id: str | None,
+        context: dict[str, Any],
+        model: str,
+    ) -> list[tuple[dict[str, Any], Any]]:
+        candidates = await self._candidates(
+            explicit_account_id=explicit_account_id,
+            context=context,
+            model=model,
+        )
+        if not candidates:
+            raise CodeArtsUpstreamError(
+                "No usable CodeArts account is available. Accounts may be cooling down or at concurrency capacity.",
+                category="no_account",
+                retryable=False,
+            )
+        return candidates
 
     def _complete_context(
         self,
@@ -328,14 +352,15 @@ class CodeArtsGateway:
         context: dict[str, Any],
         explicit_account_id: str | None = None,
         options: dict[str, Any] | None = None,
+        prepared_candidates: list[tuple[dict[str, Any], Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         self._reset_trace(model)
-        candidates = await self._candidates(explicit_account_id=explicit_account_id, context=context, model=model)
-        if not candidates:
-            raise CodeArtsUpstreamError(
-                "No usable CodeArts account is available. Accounts may be cooling down or at concurrency capacity.",
-                category="no_account",
-                retryable=False,
+        candidates = prepared_candidates
+        if candidates is None:
+            candidates = await self.prepare_stream_candidates(
+                explicit_account_id=explicit_account_id,
+                context=context,
+                model=model,
             )
 
         budget = self._new_budget()

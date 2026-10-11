@@ -239,6 +239,32 @@ def test_transient_network_error_retries_same_account_before_cooldown(monkeypatc
     assert health["total_failures"] == 0
 
 
+def test_gateway_transport_failure_does_not_poison_account_health(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    manager = AuthManager(settings)
+    manager.pool.save(_record("a", ENV_CN), "a")
+    gateway = CodeArtsGateway(settings, manager)
+
+    gateway._mark_failure(
+        "a",
+        "GLM-5.2",
+        CodeArtsUpstreamError("connection reset", category="network", retryable=True),
+    )
+    healthy = manager.account_status("a")["health"]
+    assert healthy["status"] == "healthy"
+    assert healthy["total_failures"] == 0
+    assert [item["id"] for item in manager.pool.candidates(model="GLM-5.2")] == ["a"]
+
+    gateway._mark_failure(
+        "a",
+        "GLM-5.2",
+        CodeArtsUpstreamError("expired credentials", status_code=401, category="auth", retryable=True),
+    )
+    auth_failed = manager.account_status("a")["health"]
+    assert auth_failed["status"] == "cooldown"
+    assert auth_failed["needs_relogin"] is True
+
+
 def test_gateway_reuses_bound_account_chat_id_and_full_messages(monkeypatch, tmp_path) -> None:
     settings = _settings(tmp_path)
     manager = AuthManager(settings)
@@ -323,7 +349,10 @@ def test_streaming_fails_over_before_first_delta(monkeypatch, tmp_path) -> None:
         return "".join(parts)
 
     assert asyncio.run(collect()) == "Hello"
-    assert manager.account_status("a")["health"]["status"] == "cooldown"
+    status_a = manager.account_status("a")
+    assert status_a["health"]["status"] == "healthy"
+    assert status_a["health"]["total_failures"] == 0
+    assert status_a["stats"]["failure_count"] == 2
     saved = ConversationStore(settings).get(context["id"])
     assert saved is not None
     assert saved["account_id"] == "b"

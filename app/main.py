@@ -482,6 +482,16 @@ async def chat_completions(
 
     if request.stream:
         include_usage = bool(request.stream_options and request.stream_options.include_usage)
+        try:
+            prepared_candidates = await gateway.prepare_stream_candidates(
+                explicit_account_id=x_codearts_account,
+                context=conversation,
+                model=request.model,
+            )
+        except CodeArtsUpstreamError as exc:
+            status_code = 503 if exc.category in {"no_account", "retry_budget"} else 502
+            finish_log(status=status_code, success=False, error_category=exc.category)
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
         async def event_stream() -> AsyncIterator[str]:
             completed = False
@@ -496,6 +506,7 @@ async def chat_completions(
                     context=conversation,
                     explicit_account_id=x_codearts_account,
                     options=options,
+                    prepared_candidates=prepared_candidates,
                 ):
                     delta = upstream_chunk.get("delta") if isinstance(upstream_chunk, dict) else {}
                     finish_reason = upstream_chunk.get("finish_reason") if isinstance(upstream_chunk, dict) else None

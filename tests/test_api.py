@@ -247,6 +247,42 @@ def test_streaming_usage_is_omitted_without_include_usage(monkeypatch, tmp_path)
         app.dependency_overrides.clear()
 
 
+def test_streaming_no_account_returns_http_503_before_sse(tmp_path) -> None:
+    settings = Settings(
+        pending_auth_file=str(tmp_path / "pending.json"),
+        accounts_dir=str(tmp_path / "accounts"),
+        routing_file=str(tmp_path / "routing.json"),
+        conversations_dir=str(tmp_path / "conversations"),
+        usage_file=str(tmp_path / "usage.jsonl"),
+        request_logs_file=str(tmp_path / "requests.jsonl"),
+        gateway_settings_file=str(tmp_path / "settings.json"),
+        keepalive_enabled=False,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_api_auth(client),
+            json={
+                "model": "GLM-5.2",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert response.status_code == 503
+        assert "No usable CodeArts account" in response.json()["detail"]
+        assert response.headers.get("content-type", "").startswith("application/json")
+
+        logs = client.get("/api/ui/logs?time_range=all").json()["items"]
+        assert len(logs) == 1
+        assert logs[0]["status"] == 503
+        assert logs[0]["success"] is False
+        assert logs[0]["error_category"] == "no_account"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_auth_endpoints_do_not_expose_secrets(tmp_path) -> None:
     settings = Settings(
         port=8123,

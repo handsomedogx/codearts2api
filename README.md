@@ -97,7 +97,7 @@ Each account has a process-local concurrency lease. `CODEARTS_ACCOUNT_MAX_CONCUR
 
 Transient network, timeout, and upstream `5xx` failures may retry the same account first. Every client request also has a global retry budget (`CODEARTS_RETRY_BUDGET_ATTEMPTS` + `CODEARTS_RETRY_BUDGET_SECONDS`) so a large pool cannot be swept indefinitely. New attempts use exponential backoff (`base * 2^n`, capped) with configurable jitter.
 
-Health is scoped at two levels. Authentication, credential, and transport failures can cool down the whole account. Model/rate/server failures are stored under `account + model`, so `GLM-5.2` can cool down on one account while `GLM-5.1` remains eligible on the same account. The dashboard exposes the safe public health metadata; credentials and response bodies are never included.
+Health is scoped at two levels. Authentication and credential failures can cool down the whole account. Transient network/timeout failures are retried and recorded in request/runtime statistics but do not disable an otherwise healthy account. Model/rate/server failures are stored under `account + model`, so `GLM-5.2` can cool down on one account while `GLM-5.1` remains eligible on the same account. The dashboard exposes the safe public health metadata; credentials and response bodies are never included.
 
 For streaming requests, failover is allowed only before the first response delta has been sent to the caller. Once output has started, the gateway keeps the same account so a retry cannot duplicate already streamed text.
 
