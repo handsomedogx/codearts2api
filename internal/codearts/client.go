@@ -79,11 +79,50 @@ func (c *Client) Stream(ctx context.Context, accountID string, request Request, 
 	return c.execute(ctx, accountID, request, onChunk, false)
 }
 
+func (c *Client) PrepareStreamCandidates(accountID string, request Request) ([]auth.AccountRecord, error) {
+	candidates, err := c.Pool.Candidates(accountID, request.PreferredAccountID, request.Model)
+	if err != nil {
+		return nil, &UpstreamError{Category: "no_account", Retryable: false, Message: "No usable CodeArts account is available"}
+	}
+	if len(candidates) == 0 {
+		return nil, &UpstreamError{Category: "no_account", Retryable: false, Message: "No usable CodeArts account is available"}
+	}
+	maxAccounts := c.Settings.RoutingMaxAttempts
+	if maxAccounts <= 0 || maxAccounts > len(candidates) {
+		maxAccounts = len(candidates)
+	}
+	prepared := make([]auth.AccountRecord, 0, maxAccounts)
+	for _, candidate := range candidates[:maxAccounts] {
+		if _, err := c.Auth.Credentials(candidate.ID); err != nil {
+			_ = c.Pool.MarkFailure(candidate.ID, request.Model, "credential_refresh", 0, 0)
+			continue
+		}
+		refreshed, err := c.Auth.LoadAccount(candidate.ID)
+		if err != nil {
+			_ = c.Pool.MarkFailure(candidate.ID, request.Model, "credential_refresh", 0, 0)
+			continue
+		}
+		prepared = append(prepared, refreshed)
+	}
+	if len(prepared) == 0 {
+		return nil, &UpstreamError{Category: "no_account", Retryable: false, Message: "No usable CodeArts account is available after credential refresh"}
+	}
+	return prepared, nil
+}
+
+func (c *Client) StreamPrepared(ctx context.Context, accountID string, request Request, candidates []auth.AccountRecord, onChunk func(Chunk) error) (Result, error) {
+	return c.executeCandidates(ctx, accountID, request, candidates, onChunk, false)
+}
+
 func (c *Client) execute(ctx context.Context, accountID string, request Request, onChunk func(Chunk) error, retryAfterEmission bool) (Result, error) {
 	candidates, err := c.Pool.Candidates(accountID, request.PreferredAccountID, request.Model)
 	if err != nil {
 		return Result{}, err
 	}
+	return c.executeCandidates(ctx, accountID, request, candidates, onChunk, retryAfterEmission)
+}
+
+func (c *Client) executeCandidates(ctx context.Context, accountID string, request Request, candidates []auth.AccountRecord, onChunk func(Chunk) error, retryAfterEmission bool) (Result, error) {
 	if len(candidates) == 0 {
 		return Result{}, &UpstreamError{Category: "no_account", Retryable: false, Message: "No usable CodeArts account is available"}
 	}

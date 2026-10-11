@@ -6,6 +6,7 @@ import (
 	"html"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -184,7 +185,11 @@ func (a *API) access(w http.ResponseWriter, r *http.Request) {
 func (a *API) accessRegenerate(w http.ResponseWriter, r *http.Request) {
 	access, err := a.gateway.Regenerate()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "access_regenerate_failed")
+		status := http.StatusBadRequest
+		if strings.TrimSpace(os.Getenv("CODEARTS2API_API_KEY")) != "" {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error(), "access_regenerate_failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -384,12 +389,17 @@ func (a *API) probeAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteAccount(w http.ResponseWriter, r *http.Request) {
-	deleted, err := a.auth.DeleteAccount(r.PathValue("account_id"))
+	accountID := r.PathValue("account_id")
+	deleted, err := a.auth.DeleteAccount(accountID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "delete_failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted})
+	if !deleted {
+		writeError(w, http.StatusNotFound, "CodeArts account not found", "not_found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "account_id": accountID})
 }
 
 func (a *API) routing(w http.ResponseWriter, _ *http.Request) {
@@ -481,6 +491,10 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, _ := payload["model"].(string)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = a.settings.DefaultModel
+	}
 	rawMessages, _ := payload["messages"].([]any)
 	messages := make([]map[string]any, 0, len(rawMessages))
 	for _, raw := range rawMessages {
@@ -488,8 +502,8 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			messages = append(messages, message)
 		}
 	}
-	if model == "" || len(messages) == 0 {
-		writeError(w, http.StatusBadRequest, "model and messages are required", "invalid_request")
+	if len(messages) == 0 {
+		writeError(w, http.StatusBadRequest, "messages are required", "invalid_request")
 		return
 	}
 	requestedConversationID := strings.TrimSpace(r.Header.Get("X-CodeArts-Conversation"))
@@ -509,16 +523,23 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	accountID := strings.TrimSpace(r.Header.Get("X-CodeArts-Account"))
 	completionID := fmt.Sprintf("chatcmpl-%x", time.Now().UnixNano())
-	requestID := fmt.Sprintf("req-%x", time.Now().UnixNano())
+	requestID := strings.TrimSpace(w.Header().Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = fmt.Sprintf("req-%x", time.Now().UnixNano())
+		w.Header().Set("X-Request-ID", requestID)
+	}
 	started := a.observe.Begin()
 	stream, _ := payload["stream"].(bool)
 	if stream {
-		if !a.codearts.Pool.HasUsable(accountID, model) {
-			a.recordObservation(started, r, requestID, model, true, http.StatusServiceUnavailable, false, accountID, nil, conversationContext.ID, "no_account")
-			writeError(w, http.StatusServiceUnavailable, "No usable CodeArts account is available", "no_account")
+		prepared, err := a.codearts.PrepareStreamCandidates(accountID, request)
+		if err != nil {
+			status := upstreamHTTPStatus(err)
+			category := errorCategory(err)
+			a.recordObservation(started, r, requestID, model, true, status, false, accountID, nil, conversationContext.ID, category)
+			writeError(w, status, err.Error(), category)
 			return
 		}
-		a.streamChatCompletion(w, r, completionID, requestID, accountID, request, payload, started, conversationContext)
+		a.streamChatCompletion(w, r, completionID, requestID, accountID, request, payload, started, conversationContext, prepared)
 		return
 	}
 	result, err := a.codearts.Complete(r.Context(), accountID, request)
@@ -536,7 +557,11 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.recordObservation(started, r, requestID, model, false, http.StatusOK, true, result.AccountID, &result, updatedContext.ID, "")
-	message := map[string]any{"role": "assistant", "content": result.Text}
+	var assistantContent any
+	if result.Text != "" {
+		assistantContent = result.Text
+	}
+	message := map[string]any{"role": "assistant", "content": assistantContent}
 	if result.ReasoningContent != "" {
 		message["reasoning_content"] = result.ReasoningContent
 	}
@@ -559,7 +584,7 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *API) streamChatCompletion(w http.ResponseWriter, r *http.Request, completionID, requestID, accountID string, request codearts.Request, payload map[string]any, started time.Time, conversationContext conversation.Context) {
+func (a *API) streamChatCompletion(w http.ResponseWriter, r *http.Request, completionID, requestID, accountID string, request codearts.Request, payload map[string]any, started time.Time, conversationContext conversation.Context, prepared []auth.AccountRecord) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		a.recordObservation(started, r, requestID, request.Model, true, http.StatusInternalServerError, false, accountID, nil, conversationContext.ID, "stream_error")
@@ -577,7 +602,7 @@ func (a *API) streamChatCompletion(w http.ResponseWriter, r *http.Request, compl
 	})
 	flusher.Flush()
 	finishSeen := false
-	result, err := a.codearts.Stream(r.Context(), accountID, request, func(chunk codearts.Chunk) error {
+	result, err := a.codearts.StreamPrepared(r.Context(), accountID, request, prepared, func(chunk codearts.Chunk) error {
 		if chunk.FinishReason != nil {
 			finishSeen = true
 		}
@@ -774,6 +799,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, message, code string) {
 	writeJSON(w, status, map[string]any{
+		"detail": message,
 		"error": map[string]any{
 			"message": message,
 			"type":    "invalid_request_error",

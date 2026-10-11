@@ -27,4 +27,9 @@ func TestUsageSummaryAndLogs(t *testing.T) {
 	if logs["total_matched"] != 1 {
 		t.Fatalf("unexpected log query: %#v", logs)
 	}
+	invalidRange := store.QueryLogs("", "all", "nonsense", 100)
+	filters := invalidRange["filters"].(map[string]any)
+	if filters["time_range"] != "24h" {
+		t.Fatalf("invalid time range should normalize to 24h, got %#v", filters["time_range"])
+	}
 }

@@ -250,6 +250,12 @@ func (s *Store) QueryLogs(q, result, timeRange string, limit int) map[string]any
 	if result != "success" && result != "failure" {
 		result = "all"
 	}
+	timeRange = strings.ToLower(strings.TrimSpace(timeRange))
+	switch timeRange {
+	case "1h", "24h", "3d", "7d", "30d", "all":
+	default:
+		timeRange = "24h"
+	}
 	if limit < 1 {
 		limit = 1
 	}

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -391,29 +392,73 @@ func (m *Manager) saveAccount(record AccountRecord) error {
 
 func (m *Manager) publicAccount(record AccountRecord) PublicAccount {
 	profile, _ := m.Settings.Profile(record.Environment)
-	health := cloneMap(record.Health)
-	stats := cloneMap(record.Stats)
-	modelHealth := cloneMap(record.ModelHealth)
-	cooldownUntilTS := numberValue(health["cooldown_until_ts"])
+	rawHealth := cloneMap(record.Health)
+	rawStats := cloneMap(record.Stats)
+	cooldownUntilTS := numberValue(rawHealth["cooldown_until_ts"])
 	status := "healthy"
+	cooldownUntil := ""
 	if cooldownUntilTS > float64(time.Now().Unix()) {
 		status = "cooldown"
-		health["cooldown_until"] = time.Unix(int64(cooldownUntilTS), 0).UTC().Format(time.RFC3339)
-	} else if boolValueAny(health["needs_relogin"]) || int(numberValue(health["consecutive_failures"])) > 0 {
+		cooldownUntil = time.Unix(int64(cooldownUntilTS), 0).UTC().Format(time.RFC3339)
+	} else if boolValueAny(rawHealth["needs_relogin"]) || int(numberValue(rawHealth["consecutive_failures"])) > 0 {
 		status = "degraded"
 	}
-	health["status"] = status
-	requestCount := int(numberValue(stats["request_count"]))
-	totalLatency := numberValue(stats["total_latency_ms"])
+	health := map[string]any{
+		"status":                       status,
+		"consecutive_failures":         int(numberValue(rawHealth["consecutive_failures"])),
+		"total_failures":               int(numberValue(rawHealth["total_failures"])),
+		"total_successes":              int(numberValue(rawHealth["total_successes"])),
+		"last_failure_at":              stringValueAny(rawHealth["last_failure_at"]),
+		"last_success_at":              stringValueAny(rawHealth["last_success_at"]),
+		"last_error_category":          stringValueAny(rawHealth["last_error_category"]),
+		"last_status_code":             rawHealth["last_status_code"],
+		"cooldown_until":               cooldownUntil,
+		"last_probe_at":                stringValueAny(rawHealth["last_probe_at"]),
+		"probe_status":                 stringValueAny(rawHealth["probe_status"]),
+		"probe_error_category":         stringValueAny(rawHealth["probe_error_category"]),
+		"needs_relogin":                boolValueAny(rawHealth["needs_relogin"]),
+		"refresh_probe_status":         stringValueAny(rawHealth["refresh_probe_status"]),
+		"refresh_probe_error_category": stringValueAny(rawHealth["refresh_probe_error_category"]),
+	}
+	requestCount := int(numberValue(rawStats["request_count"]))
+	totalLatency := numberValue(rawStats["total_latency_ms"])
+	promptTokens := int(numberValue(rawStats["prompt_tokens"]))
+	completionTokens := int(numberValue(rawStats["completion_tokens"]))
+	totalTokens := int(numberValue(rawStats["total_tokens"]))
+	if totalTokens == 0 {
+		totalTokens = promptTokens + completionTokens
+	}
+	successCount := int(numberValue(rawStats["success_count"]))
+	failureCount := int(numberValue(rawStats["failure_count"]))
+	var avgLatency any
 	if requestCount > 0 {
-		stats["avg_latency_ms"] = math.Round(totalLatency/float64(requestCount)*10) / 10
+		avgLatency = math.Round(totalLatency/float64(requestCount)*10) / 10
 	}
-	completion := numberValue(stats["completion_tokens"])
-	successLatency := numberValue(stats["success_latency_ms"])
+	var avgOutputTPS any
+	successLatency := numberValue(rawStats["success_latency_ms"])
 	if successLatency > 0 {
-		stats["avg_output_tps"] = math.Round(completion/(successLatency/1000)*100) / 100
+		avgOutputTPS = math.Round(float64(completionTokens)/(successLatency/1000)*100) / 100
 	}
-	stats["max_concurrency"] = m.Settings.AccountMaxConcurrency
+	var lastLatency any
+	if requestCount > 0 {
+		lastLatency = math.Round(numberValue(rawStats["last_latency_ms"])*10) / 10
+	}
+	stats := map[string]any{
+		"in_flight":             0,
+		"concurrency":           0,
+		"max_concurrency":       m.Settings.AccountMaxConcurrency,
+		"available_concurrency": nil,
+		"request_count":         requestCount,
+		"success_count":         successCount,
+		"failure_count":         failureCount,
+		"prompt_tokens":         promptTokens,
+		"completion_tokens":     completionTokens,
+		"total_tokens":          totalTokens,
+		"avg_output_tps":        avgOutputTPS,
+		"avg_latency_ms":        avgLatency,
+		"last_latency_ms":       lastLatency,
+		"last_request_at":       stringValueAny(rawStats["last_request_at"]),
+	}
 	return PublicAccount{
 		ID:               record.ID,
 		Environment:      record.Environment,
@@ -427,9 +472,44 @@ func (m *Manager) publicAccount(record AccountRecord) PublicAccount {
 		DomainID:         record.DomainID,
 		UpdatedAt:        record.UpdatedAt,
 		Health:           health,
-		ModelHealth:      modelHealth,
+		ModelHealth:      normalizeModelHealth(record.ModelHealth),
 		Stats:            stats,
 	}
+}
+
+func normalizeModelHealth(value map[string]any) map[string]any {
+	result := map[string]any{}
+	now := float64(time.Now().Unix())
+	for model, raw := range value {
+		item, ok := raw.(map[string]any)
+		if !ok || item == nil {
+			continue
+		}
+		untilTS := numberValue(item["cooldown_until_ts"])
+		status := "healthy"
+		cooldownUntil := ""
+		if untilTS > now {
+			status = "cooldown"
+			cooldownUntil = time.Unix(int64(untilTS), 0).UTC().Format(time.RFC3339)
+		} else if int(numberValue(item["consecutive_failures"])) > 0 {
+			status = "degraded"
+		}
+		result[model] = map[string]any{
+			"status":               status,
+			"consecutive_failures": int(numberValue(item["consecutive_failures"])),
+			"total_failures":       int(numberValue(item["total_failures"])),
+			"total_successes":      int(numberValue(item["total_successes"])),
+			"last_error_category":  stringValueAny(item["last_error_category"]),
+			"last_status_code":     item["last_status_code"],
+			"cooldown_until":       cooldownUntil,
+		}
+	}
+	return result
+}
+
+func stringValueAny(value any) string {
+	result, _ := value.(string)
+	return result
 }
 
 func cloneMap(value map[string]any) map[string]any {
@@ -632,8 +712,19 @@ func (m *Manager) ListAccounts() ([]PublicAccount, error) {
 		if err != nil {
 			continue
 		}
+		profile, err := m.Settings.Profile(record.Environment)
+		if err != nil {
+			continue
+		}
+		record.Environment = profile.Environment
 		accounts = append(accounts, m.publicAccount(record))
 	}
+	sort.SliceStable(accounts, func(i, j int) bool {
+		if accounts[i].UpdatedAt == accounts[j].UpdatedAt {
+			return accounts[i].ID < accounts[j].ID
+		}
+		return accounts[i].UpdatedAt > accounts[j].UpdatedAt
+	})
 	return accounts, nil
 }
 
