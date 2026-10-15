@@ -12,6 +12,7 @@ import (
 
 	"github.com/handsomedogx/codearts2api/internal/auth"
 	"github.com/handsomedogx/codearts2api/internal/config"
+	"github.com/handsomedogx/codearts2api/internal/gateway"
 	"github.com/handsomedogx/codearts2api/internal/securestore"
 	"github.com/handsomedogx/codearts2api/internal/server"
 )
@@ -19,6 +20,12 @@ import (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "credentials" {
 		if err := runCredentialsCommand(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "api-key" {
+		if err := runAPIKeyCommand(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -49,6 +56,23 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func runAPIKeyCommand(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println("Gateway API key:")
+		fmt.Println("  codearts2api api-key show")
+		return nil
+	}
+	if args[0] != "show" {
+		return fmt.Errorf("unknown api-key command %q; expected show", args[0])
+	}
+	access, err := gatewayAccess()
+	if err != nil {
+		return err
+	}
+	fmt.Println(access.APIKey)
+	return nil
 }
 
 func runCredentialsCommand(args []string) error {
@@ -162,6 +186,24 @@ func credentialManager() (*auth.Manager, error) {
 	return auth.NewManager(settings), nil
 }
 
+func gatewayAccess() (gateway.Access, error) {
+	settings := config.Load()
+	securePaths := []string{settings.GatewaySettingsFile}
+	legacySettings := ""
+	if settings.MigrateLegacy {
+		legacySettings = filepath.Join(settings.LegacyDataDir, "settings.json")
+		securePaths = append(securePaths, legacySettings)
+	}
+	if err := securestore.PrepareRuntime(securePaths...); err != nil {
+		return gateway.Access{}, fmt.Errorf("initialize secure gateway storage: %w", err)
+	}
+	access, err := gateway.New(settings.GatewaySettingsFile, legacySettings).Ensure()
+	if err != nil {
+		return gateway.Access{}, fmt.Errorf("load gateway API key: %w", err)
+	}
+	return access, nil
+}
+
 func migrationPassword(confirm bool) (string, error) {
 	if value := os.Getenv("CODEARTS2API_MIGRATION_PASSWORD"); value != "" {
 		return value, nil
@@ -190,6 +232,7 @@ func printUsage() {
 	fmt.Println("  codearts2api credentials export     Export all accounts to a password-encrypted migration bundle")
 	fmt.Println("  codearts2api credentials import     Import a migration bundle and re-encrypt for this machine")
 	fmt.Println("  codearts2api credentials import-plain  Verify plaintext credentials and encrypt them for this machine")
+	fmt.Println("  codearts2api api-key show            Show the current gateway API key")
 }
 
 func printCredentialsUsage() {

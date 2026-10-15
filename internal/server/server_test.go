@@ -42,10 +42,11 @@ func TestChatCompletionsRejectsInvalidBody(t *testing.T) {
 }
 
 func TestAuthLoginURL(t *testing.T) {
+	t.Setenv("CODEARTS2API_API_KEY", "test-key")
 	t.Setenv("CODEARTS_PENDING_AUTH_FILE", filepath.Join(t.TempDir(), "oauth_pending.json"))
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/login-url?environment=cn", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth("admin", "test-key")
 
 	New().ServeHTTP(rr, req)
 
@@ -63,6 +64,7 @@ func TestAuthLoginURL(t *testing.T) {
 
 func TestAccountsResponseKeepsWebUIContract(t *testing.T) {
 	temp := t.TempDir()
+	t.Setenv("CODEARTS2API_API_KEY", "test-key")
 	accountsDir := filepath.Join(temp, "accounts")
 	if err := os.MkdirAll(accountsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -77,7 +79,7 @@ func TestAccountsResponseKeepsWebUIContract(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/ui/accounts", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth("admin", "test-key")
 	New().ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
@@ -102,9 +104,11 @@ func TestAccountsResponseKeepsWebUIContract(t *testing.T) {
 }
 
 func TestEmbeddedWebAssetsDisableBrowserCache(t *testing.T) {
+	t.Setenv("CODEARTS2API_API_KEY", "test-key")
 	for _, path := range []string{"/", "/static/app.js"} {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.SetBasicAuth("admin", "test-key")
 		New().ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("%s expected %d, got %d", path, http.StatusOK, rr.Code)
@@ -119,7 +123,7 @@ func TestAccessRegenerateEnvironmentOverrideReturnsConflict(t *testing.T) {
 	t.Setenv("CODEARTS2API_API_KEY", "test-key")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/ui/access/regenerate", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth("admin", "test-key")
 	New().ServeHTTP(rr, req)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("expected %d, got %d: %s", http.StatusConflict, rr.Code, rr.Body.String())
@@ -128,6 +132,7 @@ func TestAccessRegenerateEnvironmentOverrideReturnsConflict(t *testing.T) {
 
 func TestDeleteAccountKeepsPythonContract(t *testing.T) {
 	temp := t.TempDir()
+	t.Setenv("CODEARTS2API_API_KEY", "test-key")
 	accountsDir := filepath.Join(temp, "accounts")
 	if err := os.MkdirAll(accountsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -137,7 +142,7 @@ func TestDeleteAccountKeepsPythonContract(t *testing.T) {
 
 	missing := httptest.NewRecorder()
 	missingReq := httptest.NewRequest(http.MethodDelete, "/api/ui/accounts/missing", nil)
-	missingReq.RemoteAddr = "127.0.0.1:12345"
+	missingReq.SetBasicAuth("admin", "test-key")
 	New().ServeHTTP(missing, missingReq)
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing account expected 404, got %d: %s", missing.Code, missing.Body.String())
@@ -148,7 +153,7 @@ func TestDeleteAccountKeepsPythonContract(t *testing.T) {
 	}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/api/ui/accounts/a1", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth("admin", "test-key")
 	New().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -186,7 +191,7 @@ func TestChatDefaultsModelAndCorrelatesRequestID(t *testing.T) {
 
 	logsRR := httptest.NewRecorder()
 	logsReq := httptest.NewRequest(http.MethodGet, "/api/ui/logs?time_range=all", nil)
-	logsReq.RemoteAddr = "127.0.0.1:12345"
+	logsReq.SetBasicAuth("admin", "test-key")
 	New().ServeHTTP(logsRR, logsReq)
 	var logsBody map[string]any
 	if err := json.Unmarshal(logsRR.Body.Bytes(), &logsBody); err != nil {

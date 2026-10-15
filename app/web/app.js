@@ -31,10 +31,10 @@ const ACCOUNT_POLL_ACTIVE_MS = 1000;
 let accountPollTimer = null;
 let accountPollBusy = false;
 
-function authHeaders(json = false) {
+function authHeaders(path, json = false) {
   const headers = {};
   const key = state.access.apiKey || "";
-  if (key) headers.Authorization = `Bearer ${key}`;
+  if (key && String(path || "").startsWith("/v1/")) headers.Authorization = `Bearer ${key}`;
   if (json) headers["Content-Type"] = "application/json";
   return headers;
 }
@@ -42,7 +42,7 @@ function authHeaders(json = false) {
 async function apiFetch(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: { ...authHeaders(Boolean(options.body)), ...(options.headers || {}) },
+    headers: { ...authHeaders(path, Boolean(options.body)), ...(options.headers || {}) },
   });
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
@@ -999,7 +999,7 @@ async function sendPlayground() {
   try {
     const response = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: { ...authHeaders(true) },
+      headers: { ...authHeaders("/v1/chat/completions", true) },
       body: JSON.stringify({ model: $("modelSelect").value || "GLM-5.2", messages, stream: true }),
     });
     if (!response.ok) {

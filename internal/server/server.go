@@ -126,6 +126,9 @@ func (a *API) routes() {
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "codearts2api-go")
 	w.Header().Set("X-Request-ID", fmt.Sprintf("req-%x", time.Now().UnixNano()))
+	if isDashboardPath(r.URL.Path) && !a.authorizeDashboard(w, r) {
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/v1/") {
 		candidate := ""
 		if authorization := strings.TrimSpace(r.Header.Get("Authorization")); len(authorization) >= 7 && strings.EqualFold(authorization[:7], "Bearer ") {
@@ -136,11 +139,18 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if isManagementPath(r.URL.Path) && !isLoopbackRequest(r) {
-		writeError(w, http.StatusForbidden, "Dashboard management APIs are available only from this machine", "forbidden")
-		return
-	}
 	a.mux.ServeHTTP(w, r)
+}
+
+func (a *API) authorizeDashboard(w http.ResponseWriter, r *http.Request) bool {
+	username, password, ok := r.BasicAuth()
+	if ok && username == "admin" && a.gateway.Verify(password) {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="codearts2api Dashboard", charset="UTF-8"`)
+	w.Header().Set("Cache-Control", "no-store")
+	writeError(w, http.StatusUnauthorized, "Dashboard authentication required", "dashboard_auth_required")
+	return false
 }
 
 func (a *API) webUI(w http.ResponseWriter, _ *http.Request) {
@@ -721,21 +731,12 @@ func upstreamHTTPStatus(err error) int {
 	return http.StatusBadGateway
 }
 
-func isManagementPath(path string) bool {
-	return strings.HasPrefix(path, "/api/ui/") || path == "/auth/login" || path == "/auth/login-url"
-}
-
-func isLoopbackRequest(r *http.Request) bool {
-	host := r.RemoteAddr
-	if parsed, _, err := net.SplitHostPort(host); err == nil {
-		host = parsed
-	}
-	host = strings.Trim(host, "[]")
-	if strings.EqualFold(host, "localhost") || host == "" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+func isDashboardPath(path string) bool {
+	return path == "/" ||
+		strings.HasPrefix(path, "/static/") ||
+		strings.HasPrefix(path, "/api/ui/") ||
+		path == "/auth/login" ||
+		path == "/auth/login-url"
 }
 
 func requestBaseURL(r *http.Request) string {

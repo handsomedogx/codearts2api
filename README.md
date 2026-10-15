@@ -48,9 +48,10 @@ http://127.0.0.1:8000/
 
 First-use flow:
 
-1. click **Add Account** and finish the China or International CodeArts OAuth login;
-2. open **Settings → External client access**;
-3. copy the generated **Base URL** and **API Key** into an OpenAI-compatible client.
+1. run `codearts2api api-key show` to display the current gateway API key (or use the value you explicitly set with `CODEARTS2API_API_KEY`);
+2. open the Dashboard and complete the browser's native Basic Auth prompt with username `admin` and that API key as the password;
+3. click **Add Account** and finish the China or International CodeArts OAuth login;
+4. open **Settings → External client access** and copy the **Base URL** / **API Key** into an OpenAI-compatible client.
 
 Typical local client configuration:
 
@@ -228,7 +229,15 @@ Keep that Linux master key if you want to preserve existing login state across r
 
 When upgrading from the earlier relative `data/` layout, the Go runtime automatically migrates routing/log/conversation data into the platform runtime-data directory. Existing plaintext `data/settings.json`, `data/oauth_pending.json` and `data/accounts/*.json` are read once, rewritten using the platform protection scheme (DPAPI on Windows, AES-256-GCM on Linux), and the old plaintext sensitive files are removed after a successful migration.
 
-The local Dashboard exposes the full Base URL and API key under **Settings → External client access**. The management endpoints that can reveal or rotate the key accept only loopback connections; remote clients cannot read the key from the gateway.
+The Dashboard and all Dashboard management endpoints are protected with HTTP Basic Auth. Use username `admin` and the current gateway API key as the password. This applies to `/`, `/static/*`, `/api/ui/*`, `/auth/login`, and `/auth/login-url`; `/health` and `/oauth/callback` remain public, while `/v1/*` continues to use Bearer authentication independently.
+
+If the gateway generated its API key automatically, retrieve it explicitly on the host with:
+
+```text
+codearts2api api-key show
+```
+
+The command decrypts the locally protected key only when explicitly invoked and prints it to stdout. It also works before the first Dashboard login, avoiding a bootstrap lockout. If `CODEARTS2API_API_KEY` is configured, `api-key show` returns that configured value.
 
 OpenAI-compatible clients send:
 
@@ -245,7 +254,7 @@ CODEARTS2API_HOST=127.0.0.1
 CODEARTS2API_PORT=8000
 ```
 
-To serve another device on the LAN, intentionally bind `CODEARTS2API_HOST=0.0.0.0`, allow the port in the firewall, and use the machine's LAN address as the Base URL. Keep Dashboard management local to the server. For public deployments, put HTTPS/reverse-proxy access control in front of the gateway instead of exposing the development port directly.
+To serve another device on the LAN, intentionally bind `CODEARTS2API_HOST=0.0.0.0`, allow the port in the firewall, and use the machine's LAN address as the Base URL. For public deployments, keep the Go service bound to loopback and put HTTPS/reverse-proxy access in front of it. Because Basic Auth transmits credentials on every authenticated request, never expose the Dashboard over plain HTTP on an untrusted network; terminate TLS at Nginx/Caddy/a trusted proxy first.
 
 Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. When that override is present it replaces the generated key and Dashboard regeneration is disabled. The Go runtime loads `.env` automatically and supports the same CodeArts service endpoint, OAuth metadata, retry/cooldown, keepalive and storage-path environment variables as the Python reference implementation; these are advanced tuning knobs and are deliberately omitted from the normal `.env.example`.
 
