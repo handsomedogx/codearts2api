@@ -940,6 +940,134 @@ async function regenerateApiKey() {
   }
 }
 
+async function responseError(response) {
+  let detail = `${response.status} ${response.statusText}`;
+  try {
+    const body = await response.json();
+    detail = body.detail || body.error?.message || detail;
+  } catch (_) {}
+  return detail;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function contentDispositionFilename(value) {
+  const match = String(value || "").match(/filename="?([^";]+)"?/i);
+  return match?.[1] || `codearts2api-accounts-${new Date().toISOString().replace(/[:.]/g, "-")}.enc`;
+}
+
+async function exportCredentials() {
+  const password = $("exportMigrationPassword").value;
+  const confirmation = $("exportMigrationPasswordConfirm").value;
+  const zh = window.codeartsI18n.getLanguage() === "zh-CN";
+  if (password.length < 8) {
+    toast(zh ? "迁移密码至少需要 8 个字符" : "Migration password must be at least 8 characters", "error");
+    return;
+  }
+  if (password !== confirmation) {
+    toast(zh ? "两次输入的迁移密码不一致" : "Migration passwords do not match", "error");
+    return;
+  }
+  const button = $("exportCredentialsBtn");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/ui/credentials/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    if (!response.ok) throw new Error(await responseError(response));
+    const blob = await response.blob();
+    downloadBlob(blob, contentDispositionFilename(response.headers.get("Content-Disposition")));
+    $("exportMigrationPassword").value = "";
+    $("exportMigrationPasswordConfirm").value = "";
+    const count = response.headers.get("X-CodeArts-Account-Count");
+    $("credentialTransferStatus").textContent = zh ? `已导出 ${count || ""} 个账号的加密迁移包。` : `Exported encrypted bundle${count ? ` with ${count} account(s)` : ""}.`;
+    toast(zh ? "加密迁移包已导出" : "Encrypted credential bundle exported", "success");
+  } catch (error) {
+    toast((zh ? `导出失败：${error.message}` : `Export failed: ${error.message}`), "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function importCredentials() {
+  const file = $("importCredentialsFile").files?.[0];
+  const password = $("importMigrationPassword").value;
+  const zh = window.codeartsI18n.getLanguage() === "zh-CN";
+  if (!file) {
+    toast(zh ? "请先选择 .enc 文件" : "Choose an .enc file first", "error");
+    return;
+  }
+  if (password.length < 8) {
+    toast(zh ? "迁移密码至少需要 8 个字符" : "Migration password must be at least 8 characters", "error");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("password", password);
+  form.append("replace", String($("replaceCredentials").checked));
+  const button = $("importCredentialsBtn");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/ui/credentials/import", { method: "POST", body: form });
+    if (!response.ok) throw new Error(await responseError(response));
+    const body = await response.json();
+    $("importCredentialsFile").value = "";
+    $("importMigrationPassword").value = "";
+    $("replaceCredentials").checked = false;
+    await loadAccounts();
+    $("credentialTransferStatus").textContent = zh
+      ? `已导入 ${body.imported || 0} 个账号，其中覆盖 ${body.replaced || 0} 个。`
+      : `Imported ${body.imported || 0} account(s), replacing ${body.replaced || 0}.`;
+    toast(zh ? "加密迁移包导入完成" : "Encrypted credential bundle imported", "success");
+  } catch (error) {
+    toast((zh ? `导入失败：${error.message}` : `Import failed: ${error.message}`), "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function importPlainCredentials() {
+  const file = $("importPlainCredentialsFile").files?.[0];
+  const zh = window.codeartsI18n.getLanguage() === "zh-CN";
+  if (!file) {
+    toast(zh ? "请先选择明文 JSON 文件" : "Choose a plaintext JSON file first", "error");
+    return;
+  }
+  if (!window.confirm(zh
+    ? "明文 JSON 可能包含 AK/SK、Security Token 和刷新凭证。确认只导入可信文件并在使用后自行删除源文件？"
+    : "Plaintext JSON may contain AK/SK, security tokens and refresh credentials. Import this trusted file?")) return;
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const button = $("importPlainCredentialsBtn");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/ui/credentials/import-plain", { method: "POST", body: form });
+    if (!response.ok) throw new Error(await responseError(response));
+    const body = await response.json();
+    $("importPlainCredentialsFile").value = "";
+    await loadAccounts();
+    $("credentialTransferStatus").textContent = zh
+      ? `明文凭证导入完成：新增 ${body.imported || 0} 个，更新 ${body.updated || 0} 个。`
+      : `Plaintext import completed: ${body.imported || 0} added, ${body.updated || 0} updated.`;
+    toast(zh ? "明文凭证导入完成" : "Plaintext credentials imported", "success");
+  } catch (error) {
+    toast((zh ? `明文导入失败：${error.message}` : `Plaintext import failed: ${error.message}`), "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function streamLabel(text) {
   if (text === "Streaming") return window.codeartsI18n.getLanguage() === "zh-CN" ? "正在输出" : "Streaming";
   return tr(text);
@@ -1094,6 +1222,9 @@ $("usageRange").addEventListener("change", () => {
 $("copyGatewayBaseUrlBtn").addEventListener("click", () => copyText(state.access.baseUrl || absoluteBaseUrl(), tr("Copied")));
 $("copyGatewayApiKeyBtn").addEventListener("click", () => copyText(state.access.apiKey || "", tr("Copied")));
 $("regenerateApiKeyBtn").addEventListener("click", regenerateApiKey);
+$("exportCredentialsBtn").addEventListener("click", exportCredentials);
+$("importCredentialsBtn").addEventListener("click", importCredentials);
+$("importPlainCredentialsBtn").addEventListener("click", importPlainCredentials);
 $("sendBtn").addEventListener("click", sendPlayground);
 $("copyResponseBtn").addEventListener("click", () => copyText(state.responseText || $("responseOutput").textContent));
 $("copyPythonBtn").addEventListener("click", () => copyText($("pythonSnippet").textContent));

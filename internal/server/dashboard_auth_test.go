@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,5 +72,56 @@ func TestOAuthCallbackRemainsPublic(t *testing.T) {
 	}
 	if rr.Header().Get("WWW-Authenticate") != "" {
 		t.Fatalf("oauth callback must not require Dashboard Basic auth")
+	}
+}
+
+func TestCredentialManagementEndpointsRequireDashboardAuth(t *testing.T) {
+	t.Setenv("CODEARTS2API_API_KEY", "test-key")
+	for _, path := range []string{
+		"/api/ui/credentials/export",
+		"/api/ui/credentials/import",
+		"/api/ui/credentials/import-plain",
+	} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "127.0.0.1:43122"
+		New().ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("%s should require Dashboard Basic auth, got %d", path, rr.Code)
+		}
+	}
+}
+
+func TestReadCredentialUploadKeepsMultipartInMemory(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("password", "migration-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("replace", "true"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("file", "accounts.enc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte(`{"version":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/ui/credentials/import", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	fields, raw, err := readCredentialUpload(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fields["password"] != "migration-password" || fields["replace"] != "true" {
+		t.Fatalf("unexpected multipart fields: %#v", fields)
+	}
+	if string(raw) != `{"version":1}` {
+		t.Fatalf("unexpected uploaded bytes: %q", raw)
 	}
 }

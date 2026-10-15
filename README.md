@@ -264,6 +264,8 @@ Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. 
 
 Use the encrypted `.enc` bundle when moving existing CodeArts accounts between machines or platforms. Exporting decrypts the local DPAPI/AES-protected account records only in memory, then re-encrypts the portable bundle with a migration password:
 
+The Dashboard exposes the same workflow under **Settings → Credential migration**. You can export an encrypted `.enc` bundle, import one with an optional **Replace accounts with matching IDs** switch, or expand the advanced section to import plaintext credential JSON. Browser uploads are consumed directly from the request stream and processed in memory; codearts2api does not create an extra upload copy on disk. Plaintext export is intentionally not provided.
+
 ```powershell
 codearts2api credentials export -o accounts.enc
 ```

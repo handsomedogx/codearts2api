@@ -187,6 +187,20 @@ td code { color: #c7cad3; }
 .input-row { display: flex; gap: 8px; }
 .input-row .input { flex: 1; }
 .setting-status { margin-top: 10px; color: #686f7c; font-size: 10px; }
+.credential-transfer-card { grid-column: 1 / -1; }
+.credential-transfer-section { margin-top: 18px; padding-top: 18px; border-top: 1px solid #252932; }
+.credential-transfer-heading strong { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 620; }
+.credential-transfer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.credential-transfer-grid.single { grid-template-columns: 1fr; }
+.credential-transfer-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.credential-checkbox { display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; color: #8d93a0; font-size: 11px; cursor: pointer; }
+.credential-checkbox input { accent-color: currentColor; }
+.file-input { padding: 8px 10px; }
+.file-input::file-selector-button { margin-right: 10px; border: 1px solid #343945; border-radius: 7px; background: #1b1e25; color: #cbd0da; padding: 6px 9px; cursor: pointer; }
+.credential-advanced { margin-top: 18px; padding-top: 16px; border-top: 1px solid #252932; }
+.credential-advanced summary { color: #9da2af; font-size: 11px; font-weight: 600; cursor: pointer; user-select: none; }
+.credential-advanced-body { padding-top: 12px; }
+.credential-warning { margin: 0; border: 1px solid #5b3439; border-radius: 9px; background: #211619; color: #d9a2a8; padding: 10px 12px; font-size: 11px; line-height: 1.6; }
 .toast-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; pointer-events: none; }
 .toast { max-width: 340px; border: 1px solid var(--border); background: #171a22; border-radius: 10px; padding: 11px 13px; box-shadow: var(--shadow); color: #d9dbe1; font-size: 11px; animation: toastIn .18s ease; }
 .toast.error { border-color: #49252c; color: #ff9da7; }
@@ -197,6 +211,8 @@ td code { color: #c7cad3; }
   .hero-grid, .content-grid, .playground-grid { grid-template-columns: 1fr; }
   .composer-card, .response-card { min-height: auto; }
   .settings-grid { grid-template-columns: 1fr; }
+  .credential-transfer-card { grid-column: auto; }
+  .credential-transfer-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
   .shell { display: block; }

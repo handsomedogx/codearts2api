@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -119,6 +120,9 @@ func (a *API) routes() {
 	a.mux.HandleFunc("POST /api/ui/routing", a.routingUpdate)
 	a.mux.HandleFunc("GET /api/ui/usage", a.usage)
 	a.mux.HandleFunc("GET /api/ui/logs", a.logs)
+	a.mux.HandleFunc("POST /api/ui/credentials/export", a.exportCredentials)
+	a.mux.HandleFunc("POST /api/ui/credentials/import", a.importCredentials)
+	a.mux.HandleFunc("POST /api/ui/credentials/import-plain", a.importPlainCredentials)
 	a.mux.HandleFunc("GET /v1/models", a.models)
 	a.mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
 }
@@ -211,6 +215,112 @@ func (a *API) accessRegenerate(w http.ResponseWriter, r *http.Request) {
 		"regeneratable": access.Regeneratable,
 		"base_url":      requestBaseURL(r) + "/v1",
 	})
+}
+
+const dashboardCredentialUploadMaxSize = 64 << 20
+
+func (a *API) exportCredentials(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid export request", "invalid_request")
+		return
+	}
+	raw, count, err := a.auth.ExportCredentialsBytes(request.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "credential_export_failed")
+		return
+	}
+	filename := "codearts2api-accounts-" + time.Now().Format("20060102-150405") + ".enc"
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Header().Set("X-CodeArts-Account-Count", strconv.Itoa(count))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (a *API) importCredentials(w http.ResponseWriter, r *http.Request) {
+	fields, raw, err := readCredentialUpload(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_credential_upload")
+		return
+	}
+	replace := false
+	if value := strings.TrimSpace(fields["replace"]); value != "" {
+		replace, err = strconv.ParseBool(value)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "replace must be true or false", "invalid_request")
+			return
+		}
+	}
+	result, err := a.auth.ImportCredentialsBytes(raw, fields["password"], replace)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "credential_import_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"imported": result.Imported, "replaced": result.Replaced})
+}
+
+func (a *API) importPlainCredentials(w http.ResponseWriter, r *http.Request) {
+	_, raw, err := readCredentialUpload(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_credential_upload")
+		return
+	}
+	result, err := a.auth.ImportPlainCredentialsBytes(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "plaintext_credential_import_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"imported": result.Imported, "updated": result.Updated})
+}
+
+func readCredentialUpload(r *http.Request) (map[string]string, []byte, error) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("multipart/form-data upload is required")
+	}
+	fields := map[string]string{}
+	var file []byte
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read upload: %w", err)
+		}
+		name := part.FormName()
+		if part.FileName() != "" {
+			if len(file) != 0 {
+				_ = part.Close()
+				return nil, nil, fmt.Errorf("only one credential file can be uploaded")
+			}
+			data, readErr := io.ReadAll(io.LimitReader(part, dashboardCredentialUploadMaxSize+1))
+			_ = part.Close()
+			if readErr != nil {
+				return nil, nil, fmt.Errorf("read credential file: %w", readErr)
+			}
+			if len(data) > dashboardCredentialUploadMaxSize {
+				return nil, nil, fmt.Errorf("credential file is too large")
+			}
+			file = data
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(part, 64<<10))
+		_ = part.Close()
+		if readErr != nil {
+			return nil, nil, fmt.Errorf("read upload field %s: %w", name, readErr)
+		}
+		fields[name] = string(data)
+	}
+	if len(file) == 0 {
+		return nil, nil, fmt.Errorf("credential file is required")
+	}
+	return fields, file, nil
 }
 
 func (a *API) health(w http.ResponseWriter, _ *http.Request) {

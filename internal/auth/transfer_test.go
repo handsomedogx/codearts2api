@@ -68,6 +68,44 @@ func TestCredentialBundleRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCredentialBundleBytesRoundTrip(t *testing.T) {
+	if !securestore.Available() {
+		t.Skip("platform secure storage is unavailable")
+	}
+	password := "correct horse battery staple"
+	source := transferTestManager(t, filepath.Join(t.TempDir(), "source"))
+	if err := source.saveAccount(transferTestAccount("account-memory", "memory-secret-sk")); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, count, err := source.ExportCredentialsBytes(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || len(raw) == 0 {
+		t.Fatalf("unexpected in-memory export: count=%d bytes=%d", count, len(raw))
+	}
+	if strings.Contains(string(raw), "memory-secret-sk") {
+		t.Fatal("in-memory migration bundle leaked plaintext secret")
+	}
+
+	destination := transferTestManager(t, filepath.Join(t.TempDir(), "destination"))
+	result, err := destination.ImportCredentialsBytes(raw, password, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Imported != 1 || result.Replaced != 0 {
+		t.Fatalf("unexpected in-memory import result: %#v", result)
+	}
+	loaded, err := destination.LoadAccount("account-memory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SecretAccessKey != "memory-secret-sk" {
+		t.Fatalf("in-memory import did not preserve credentials: %#v", loaded)
+	}
+}
+
 func TestCredentialBundleRejectsWrongPasswordAndTampering(t *testing.T) {
 	if !securestore.Available() {
 		t.Skip("platform secure storage is unavailable")

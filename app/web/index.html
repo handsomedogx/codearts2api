@@ -325,6 +325,45 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1")</pre>
               <div class="config-row"><span>OpenAPI</span><a href="/docs" target="_blank">/docs ↗</a></div>
             </div>
           </article>
+          <article class="card credential-transfer-card">
+            <div class="card-head"><div><div class="label">CREDENTIALS</div><h2>Credential migration</h2></div></div>
+            <p class="muted">Move CodeArts accounts between machines without exposing plaintext credentials. Encrypted bundles are protected with a migration password.</p>
+
+            <div class="credential-transfer-section">
+              <div class="credential-transfer-heading">
+                <div><strong>Export encrypted bundle</strong><p class="muted compact">Downloads all current accounts as a password-encrypted <code>.enc</code> file.</p></div>
+              </div>
+              <div class="credential-transfer-grid">
+                <input class="input" id="exportMigrationPassword" type="password" autocomplete="new-password" placeholder="Migration password (8+ characters)" />
+                <input class="input" id="exportMigrationPasswordConfirm" type="password" autocomplete="new-password" placeholder="Confirm migration password" />
+              </div>
+              <div class="credential-transfer-actions"><button class="button" id="exportCredentialsBtn" type="button">Export .enc</button></div>
+            </div>
+
+            <div class="credential-transfer-section">
+              <div class="credential-transfer-heading">
+                <div><strong>Import encrypted bundle</strong><p class="muted compact">Imports an existing <code>.enc</code> bundle and re-encrypts each account for this machine.</p></div>
+              </div>
+              <div class="credential-transfer-grid">
+                <input class="input file-input" id="importCredentialsFile" type="file" accept=".enc,application/octet-stream,application/json" />
+                <input class="input" id="importMigrationPassword" type="password" autocomplete="new-password" placeholder="Migration password" />
+              </div>
+              <label class="credential-checkbox"><input id="replaceCredentials" type="checkbox" /> <span>Replace accounts with matching IDs</span></label>
+              <div class="credential-transfer-actions"><button class="button ghost" id="importCredentialsBtn" type="button">Import .enc</button></div>
+            </div>
+
+            <details class="credential-advanced">
+              <summary>Advanced · Import plaintext JSON</summary>
+              <div class="credential-advanced-body">
+                <p class="credential-warning">Plaintext JSON may contain AK/SK, security tokens and refresh material. Import only files you trust and delete the source file when it is no longer needed. Plaintext export is intentionally not supported.</p>
+                <div class="credential-transfer-grid single">
+                  <input class="input file-input" id="importPlainCredentialsFile" type="file" accept=".json,application/json" />
+                </div>
+                <div class="credential-transfer-actions"><button class="button danger-soft" id="importPlainCredentialsBtn" type="button">Import plaintext JSON</button></div>
+              </div>
+            </details>
+            <div class="setting-status" id="credentialTransferStatus">Files are processed in memory and are not stored as upload copies.</div>
+          </article>
         </div>
       </section>
     </main>

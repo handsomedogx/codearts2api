@@ -69,57 +69,59 @@ type ImportPlainCredentialsResult struct {
 }
 
 func (m *Manager) ExportCredentials(path, password string) (int, error) {
-	if !securestore.Available() {
-		return 0, fmt.Errorf("secure credential storage is unavailable on this platform")
-	}
 	if strings.TrimSpace(path) == "" {
 		return 0, fmt.Errorf("output path is required")
 	}
-	if err := validateMigrationPassword(password); err != nil {
-		return 0, err
-	}
-	ids, err := m.credentialAccountIDs()
+	raw, count, err := m.ExportCredentialsBytes(password)
 	if err != nil {
 		return 0, err
 	}
+	if err := atomicWriteBytes(path, raw); err != nil {
+		return 0, fmt.Errorf("write credential bundle: %w", err)
+	}
+	return count, nil
+}
+
+func (m *Manager) ExportCredentialsBytes(password string) ([]byte, int, error) {
+	if !securestore.Available() {
+		return nil, 0, fmt.Errorf("secure credential storage is unavailable on this platform")
+	}
+	if err := validateMigrationPassword(password); err != nil {
+		return nil, 0, err
+	}
+	ids, err := m.credentialAccountIDs()
+	if err != nil {
+		return nil, 0, err
+	}
 	if len(ids) == 0 {
-		return 0, fmt.Errorf("no CodeArts accounts found to export")
+		return nil, 0, fmt.Errorf("no CodeArts accounts found to export")
 	}
 	accounts := make([]AccountRecord, 0, len(ids))
 	for _, id := range ids {
 		record, err := m.LoadAccount(id)
 		if err != nil {
-			return 0, fmt.Errorf("load account %s for export: %w", id, err)
+			return nil, 0, fmt.Errorf("load account %s for export: %w", id, err)
 		}
 		accounts = append(accounts, record)
 	}
 	payload, err := json.Marshal(credentialBundlePayload{Version: credentialBundleVersion, Accounts: accounts})
 	if err != nil {
-		return 0, fmt.Errorf("encode credential bundle: %w", err)
+		return nil, 0, fmt.Errorf("encode credential bundle: %w", err)
 	}
 	envelope, err := sealCredentialBundle(payload, password, securestore.ProtectionName())
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	raw, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
-		return 0, fmt.Errorf("encode credential envelope: %w", err)
+		return nil, 0, fmt.Errorf("encode credential envelope: %w", err)
 	}
-	if err := atomicWriteBytes(path, raw); err != nil {
-		return 0, fmt.Errorf("write credential bundle: %w", err)
-	}
-	return len(accounts), nil
+	return raw, len(accounts), nil
 }
 
 func (m *Manager) ImportCredentials(path, password string, replace bool) (ImportCredentialsResult, error) {
-	if !securestore.Available() {
-		return ImportCredentialsResult{}, fmt.Errorf("secure credential storage is unavailable on this platform")
-	}
 	if strings.TrimSpace(path) == "" {
 		return ImportCredentialsResult{}, fmt.Errorf("input path is required")
-	}
-	if err := validateMigrationPassword(password); err != nil {
-		return ImportCredentialsResult{}, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -131,6 +133,19 @@ func (m *Manager) ImportCredentials(path, password string, replace bool) (Import
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ImportCredentialsResult{}, fmt.Errorf("read credential bundle: %w", err)
+	}
+	return m.ImportCredentialsBytes(raw, password, replace)
+}
+
+func (m *Manager) ImportCredentialsBytes(raw []byte, password string, replace bool) (ImportCredentialsResult, error) {
+	if !securestore.Available() {
+		return ImportCredentialsResult{}, fmt.Errorf("secure credential storage is unavailable on this platform")
+	}
+	if len(raw) > credentialBundleMaxSize {
+		return ImportCredentialsResult{}, fmt.Errorf("credential bundle is too large")
+	}
+	if err := validateMigrationPassword(password); err != nil {
+		return ImportCredentialsResult{}, err
 	}
 	var envelope credentialBundleEnvelope
 	if err := json.Unmarshal(raw, &envelope); err != nil {
@@ -205,9 +220,6 @@ func (m *Manager) ImportCredentials(path, password string, replace bool) (Import
 }
 
 func (m *Manager) ImportPlainCredentials(path string) (ImportPlainCredentialsResult, error) {
-	if !securestore.Available() {
-		return ImportPlainCredentialsResult{}, fmt.Errorf("secure credential storage is unavailable on this platform")
-	}
 	if strings.TrimSpace(path) == "" {
 		return ImportPlainCredentialsResult{}, fmt.Errorf("input path is required")
 	}
@@ -221,6 +233,16 @@ func (m *Manager) ImportPlainCredentials(path string) (ImportPlainCredentialsRes
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ImportPlainCredentialsResult{}, fmt.Errorf("read plaintext credential file: %w", err)
+	}
+	return m.ImportPlainCredentialsBytes(raw)
+}
+
+func (m *Manager) ImportPlainCredentialsBytes(raw []byte) (ImportPlainCredentialsResult, error) {
+	if !securestore.Available() {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("secure credential storage is unavailable on this platform")
+	}
+	if len(raw) > credentialBundleMaxSize {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("plaintext credential file is too large")
 	}
 	inputs, err := parsePlainCredentialInputs(raw)
 	if err != nil {
