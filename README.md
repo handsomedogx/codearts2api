@@ -251,6 +251,41 @@ Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. 
 
 `CODEARTS2API_DATA_DIR` can override the platform default runtime-data directory. More specific storage variables such as `CODEARTS_ACCOUNTS_DIR` and `CODEARTS_REQUEST_LOGS_FILE` still take precedence when explicitly configured. No environment variable is required for normal single-user Windows or Linux use.
 
+### Encrypted credential migration
+
+Use the encrypted `.enc` bundle when moving existing CodeArts accounts between machines or platforms. Exporting decrypts the local DPAPI/AES-protected account records only in memory, then re-encrypts the portable bundle with a migration password:
+
+```powershell
+codearts2api credentials export -o accounts.enc
+```
+
+The password is prompted without echo and must be entered twice when exporting. Copy `accounts.enc` to the destination machine, then import it with the same password:
+
+```powershell
+codearts2api credentials import -i accounts.enc
+```
+
+On import, the bundle is decrypted in memory and each account is immediately re-protected using the destination machine's normal secure store: DPAPI for the current Windows user, or AES-256-GCM with the Linux master key. No intermediate plaintext account file is created.
+
+By default, import refuses to overwrite an existing account with the same account id. Use `--replace` only when you intentionally want to replace matching ids:
+
+```powershell
+codearts2api credentials import -i accounts.enc --replace
+```
+
+For non-interactive automation, the migration password can be supplied through `CODEARTS2API_MIGRATION_PASSWORD`. Do not pass the migration password as a normal command-line argument, because command lines may be visible in shell history or process listings. Keep the `.enc` file and its password separately; without the password the bundle cannot be recovered.
+
+A typical Windows-to-Linux migration therefore looks like:
+
+```text
+Windows DPAPI accounts
+  -> credentials export
+  -> password-encrypted accounts.enc
+  -> copy to Linux
+  -> credentials import
+  -> Linux AES-256-GCM accounts
+```
+
 Plaintext credentials can also be imported explicitly when you already have valid Huawei credentials:
 
 ```powershell
