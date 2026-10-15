@@ -37,6 +37,7 @@ type Settings struct {
 	CNBaseURL         string
 	CNPortalBaseURL   string
 	CNSTSBaseURL      string
+	IAMBaseURL        string
 	IntlBaseURL       string
 	IntlPortalBaseURL string
 	IntlSTSBaseURL    string
@@ -98,6 +99,7 @@ func Load() Settings {
 		CNBaseURL:                      env("CODEARTS_CN_BASE_URL", "https://snap-access.cn-north-4.myhuaweicloud.com"),
 		CNPortalBaseURL:                env("CODEARTS_CN_PORTAL_BASE_URL", "https://codearts.huaweicloud.com"),
 		CNSTSBaseURL:                   env("CODEARTS_CN_STS_BASE_URL", "https://sts.cn-north-4.myhuaweicloud.com"),
+		IAMBaseURL:                     env("HUAWEI_IAM_BASE_URL", "https://iam.myhuaweicloud.com"),
 		IntlBaseURL:                    env("CODEARTS_INTL_BASE_URL", "https://snap-access.ap-southeast-1.myhuaweicloud.com"),
 		IntlPortalBaseURL:              env("CODEARTS_INTL_PORTAL_BASE_URL", "https://codearts.ap-southeast-1.huaweicloud.com"),
 		IntlSTSBaseURL:                 env("CODEARTS_INTL_STS_BASE_URL", "https://sts.cn-north-4.myhuaweicloud.com"),

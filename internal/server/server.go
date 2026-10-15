@@ -65,6 +65,9 @@ func NewRuntime() (http.Handler, func(), error) {
 	if _, err := a.gateway.Ensure(); err != nil {
 		return nil, nil, fmt.Errorf("initialize gateway API key: %w", err)
 	}
+	go func() {
+		_, _ = a.auth.BackfillAccountEmails()
+	}()
 	service := keepalive.New(a.settings, a.auth, a.codearts)
 	service.Start()
 	return a, service.Stop, nil

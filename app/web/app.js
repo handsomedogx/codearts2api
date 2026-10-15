@@ -17,7 +17,7 @@ const state = {
   streamMode: "",
   streamState: "Idle",
   lastError: "",
-  oauth: { environment: "", accountId: "", authorizeUrl: "", status: "idle", pollTimer: null, pollBusy: false },
+  oauth: { environment: "", accountId: "", authorizeUrl: "", status: "idle", pollTimer: null, pollBusy: false, baselineVersions: {} },
 };
 const pageMeta = {
   dashboard: ["OVERVIEW", "Dashboard"],
@@ -235,7 +235,7 @@ function renderAccounts() {
     identity.className = "account-identity";
     const name = document.createElement("span");
     name.className = "account-identity-name";
-    name.textContent = account.user_name || shortId(account.user_id) || tr("CodeArts account");
+    name.textContent = account.email || account.user_name || shortId(account.user_id) || tr("CodeArts account");
     const meta = document.createElement("div");
     meta.className = "account-identity-meta";
     const env = document.createElement("span");
@@ -768,6 +768,7 @@ function resetLoginWizard() {
   state.oauth.environment = "";
   state.oauth.accountId = "";
   state.oauth.authorizeUrl = "";
+  state.oauth.baselineVersions = {};
   state.oauth.status = "idle";
   renderOAuthWizard();
 }
@@ -797,7 +798,14 @@ async function checkOAuthCompletion() {
     const account = state.accounts.find((item) => item.id === state.oauth.accountId);
     if (account) {
       completeOAuthWizard(account);
+      return;
     }
+    const reauthorized = state.accounts.find((item) => {
+      if (item.environment !== state.oauth.environment) return false;
+      const previous = state.oauth.baselineVersions[item.id];
+      return previous && item.updated_at && previous !== item.updated_at;
+    });
+    if (reauthorized) completeOAuthWizard(reauthorized);
   } catch (_) {
     // Keep waiting; normal account loading surfaces gateway/API-key errors elsewhere.
   } finally {
@@ -815,7 +823,7 @@ function completeOAuthWizard(account = null) {
   state.oauth.status = "success";
   renderOAuthWizard();
   scheduleAccountPolling();
-  const label = account?.user_name || shortId(account?.user_id || "") || environmentLabel(state.oauth.environment);
+  const label = account?.email || account?.user_name || shortId(account?.user_id || "") || environmentLabel(state.oauth.environment);
   toast(`${label} · ${tr("Login successful")}`, "success");
 }
 
@@ -824,6 +832,7 @@ async function prepareLogin(environment) {
   state.oauth.environment = selected;
   state.oauth.accountId = "";
   state.oauth.authorizeUrl = "";
+  state.oauth.baselineVersions = Object.fromEntries(state.accounts.map((item) => [item.id, item.updated_at || ""]));
   state.oauth.status = "preparing";
   renderOAuthWizard();
   try {
@@ -859,7 +868,7 @@ function openAuthorizationPage() {
 async function refreshAccount(accountId) {
   try {
     const status = await apiFetch(`/api/ui/accounts/${encodeURIComponent(accountId)}/refresh`, { method: "POST" });
-    toast(`${status.user_name || shortId(status.user_id) || tr("CodeArts account")} · ${tr("CodeArts credentials refreshed")}`, "success");
+    toast(`${status.email || status.user_name || shortId(status.user_id) || tr("CodeArts account")} · ${tr("CodeArts credentials refreshed")}`, "success");
     await loadAccounts();
   } catch (error) {
     toast((window.codeartsI18n.getLanguage() === "zh-CN" ? `刷新失败：${error.message}` : `Refresh failed: ${error.message}`), "error");
@@ -1100,7 +1109,7 @@ async function handleOAuthResult(payload) {
   if (payload.success) {
     await loadAccounts();
     const account = state.accounts.find((item) => item.id === payload.account_id) || null;
-    if (state.oauth.accountId && (!payload.account_id || payload.account_id === state.oauth.accountId)) {
+    if (state.oauth.accountId && (state.oauth.status === "waiting" || state.oauth.status === "preparing")) {
       completeOAuthWizard(account);
     } else {
       toast(`${environmentLabel(payload.environment)} ${tr("Login successful")}`, "success");

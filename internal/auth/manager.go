@@ -67,6 +67,7 @@ type AccountRecord struct {
 	DomainID        string         `json:"domain_id"`
 	UserID          string         `json:"user_id"`
 	UserName        string         `json:"user_name"`
+	Email           string         `json:"email,omitempty"`
 	PrincipalURN    string         `json:"principal_urn"`
 	AuthContext     map[string]any `json:"auth_context"`
 	Stats           map[string]any `json:"stats"`
@@ -80,6 +81,7 @@ type accountSecrets struct {
 	SecretAccessKey string         `json:"secret_access_key"`
 	SecurityToken   string         `json:"security_token"`
 	RefreshToken    string         `json:"refresh_token"`
+	Email           string         `json:"email,omitempty"`
 	AuthContext     map[string]any `json:"auth_context"`
 }
 
@@ -110,6 +112,7 @@ type PublicAccount struct {
 	RefreshAvailable bool           `json:"refresh_available"`
 	UserID           string         `json:"user_id"`
 	UserName         string         `json:"user_name"`
+	Email            string         `json:"email,omitempty"`
 	DomainID         string         `json:"domain_id"`
 	UpdatedAt        string         `json:"updated_at"`
 	Health           map[string]any `json:"health"`
@@ -239,6 +242,20 @@ func (m *Manager) ExchangeCode(code string) (PublicAccount, error) {
 	if idx := strings.LastIndex(identity.PrincipalURN, ":"); idx >= 0 {
 		record.UserName = identity.PrincipalURN[idx+1:]
 	}
+	if email, err := m.queryUserEmail(payload.Credentials, identity); err == nil {
+		record.Email = email
+	}
+	if existing, found, err := m.findAccountByIdentity(record.Environment, record.DomainID, record.UserID); err != nil {
+		return PublicAccount{}, err
+	} else if found {
+		record.ID = existing.ID
+		if record.Email == "" {
+			record.Email = existing.Email
+		}
+		record.Stats = existing.Stats
+		record.Health = existing.Health
+		record.ModelHealth = existing.ModelHealth
+	}
 	if err := m.saveAccount(record); err != nil {
 		return PublicAccount{}, err
 	}
@@ -360,6 +377,58 @@ func (m *Manager) queryIdentity(profile config.Profile, credentials Credentials)
 	return identity, nil
 }
 
+func (m *Manager) queryUserEmail(credentials Credentials, identity Identity) (string, error) {
+	if strings.TrimSpace(identity.PrincipalID) == "" {
+		return "", fmt.Errorf("IAM user id is empty")
+	}
+	base := strings.TrimRight(strings.TrimSpace(m.Settings.IAMBaseURL), "/")
+	if base == "" {
+		return "", fmt.Errorf("IAM base URL is empty")
+	}
+	rawURL := base + "/v3.0/OS-USER/users/" + url.PathEscape(identity.PrincipalID)
+	signed, err := signer.SignRequest(
+		http.MethodGet,
+		rawURL,
+		http.Header{"Content-Type": {"application/json"}},
+		nil,
+		credentials.AccessKeyID,
+		credentials.SecretAccessKey,
+		credentials.SecurityToken,
+		identity.AccountID,
+		time.Time{},
+	)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	for key, values := range signed.Headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	resp, err := m.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("Huawei IAM user detail HTTP %d", resp.StatusCode)
+	}
+	var payload struct {
+		User struct {
+			Email string `json:"email"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode Huawei IAM user detail: %w", err)
+	}
+	return strings.TrimSpace(payload.User.Email), nil
+}
+
 func (m *Manager) saveAccount(record AccountRecord) error {
 	if record.ID == "" {
 		return fmt.Errorf("account id is required")
@@ -371,7 +440,7 @@ func (m *Manager) saveAccount(record AccountRecord) error {
 	secretPayload, err := json.Marshal(accountSecrets{
 		AccessKeyID: record.AccessKeyID, SecretAccessKey: record.SecretAccessKey,
 		SecurityToken: record.SecurityToken, RefreshToken: record.RefreshToken,
-		AuthContext: record.AuthContext,
+		Email: record.Email, AuthContext: record.AuthContext,
 	})
 	if err != nil {
 		return err
@@ -469,12 +538,68 @@ func (m *Manager) publicAccount(record AccountRecord) PublicAccount {
 		RefreshAvailable: record.RefreshToken != "" && len(record.AuthContext) > 0,
 		UserID:           record.UserID,
 		UserName:         record.UserName,
+		Email:            record.Email,
 		DomainID:         record.DomainID,
 		UpdatedAt:        record.UpdatedAt,
 		Health:           health,
 		ModelHealth:      normalizeModelHealth(record.ModelHealth),
 		Stats:            stats,
 	}
+}
+
+func (m *Manager) findAccountByIdentity(environment, domainID, userID string) (AccountRecord, bool, error) {
+	environment = strings.TrimSpace(environment)
+	domainID = strings.TrimSpace(domainID)
+	userID = strings.TrimSpace(userID)
+	if environment == "" || domainID == "" || userID == "" {
+		return AccountRecord{}, false, nil
+	}
+	accounts, err := m.ListAccounts()
+	if err != nil {
+		return AccountRecord{}, false, err
+	}
+	for _, account := range accounts {
+		if account.Environment != environment || account.DomainID != domainID || account.UserID != userID {
+			continue
+		}
+		record, err := m.LoadAccount(account.ID)
+		if err != nil {
+			return AccountRecord{}, false, err
+		}
+		return record, true, nil
+	}
+	return AccountRecord{}, false, nil
+}
+
+func (m *Manager) BackfillAccountEmails() (int, error) {
+	accounts, err := m.ListAccounts()
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for _, account := range accounts {
+		if strings.TrimSpace(account.Email) != "" || strings.TrimSpace(account.UserID) == "" || strings.TrimSpace(account.DomainID) == "" {
+			continue
+		}
+		credentials, err := m.Credentials(account.ID)
+		if err != nil {
+			continue
+		}
+		email, err := m.queryUserEmail(credentials, Identity{AccountID: account.DomainID, PrincipalID: account.UserID})
+		if err != nil || strings.TrimSpace(email) == "" {
+			continue
+		}
+		record, err := m.LoadAccount(account.ID)
+		if err != nil {
+			continue
+		}
+		record.Email = strings.TrimSpace(email)
+		if err := m.saveAccount(record); err != nil {
+			continue
+		}
+		updated++
+	}
+	return updated, nil
 }
 
 func normalizeModelHealth(value map[string]any) map[string]any {
@@ -673,7 +798,7 @@ func decodeAccount(payload []byte) (AccountRecord, bool, error) {
 			AccessKeyID: secrets.AccessKeyID, SecretAccessKey: secrets.SecretAccessKey,
 			SecurityToken: secrets.SecurityToken, Expiration: stored.Expiration,
 			RefreshToken: secrets.RefreshToken, DomainID: stored.DomainID,
-			UserID: stored.UserID, UserName: stored.UserName, PrincipalURN: stored.PrincipalURN,
+			UserID: stored.UserID, UserName: stored.UserName, Email: secrets.Email, PrincipalURN: stored.PrincipalURN,
 			AuthContext: secrets.AuthContext, Stats: stored.Stats, Health: stored.Health,
 			ModelHealth: stored.ModelHealth, UpdatedAt: stored.UpdatedAt,
 		}, true, nil
