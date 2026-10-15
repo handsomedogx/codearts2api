@@ -374,6 +374,12 @@ func (m *Manager) queryIdentity(profile config.Profile, credentials Credentials)
 	if err := json.Unmarshal(body, &identity); err != nil {
 		return Identity{}, fmt.Errorf("decode CodeArts caller identity: %w", err)
 	}
+	identity.AccountID = strings.TrimSpace(identity.AccountID)
+	identity.PrincipalID = strings.TrimSpace(identity.PrincipalID)
+	identity.PrincipalURN = strings.TrimSpace(identity.PrincipalURN)
+	if identity.AccountID == "" || identity.PrincipalID == "" {
+		return Identity{}, fmt.Errorf("CodeArts caller identity response is missing account_id or principal_id")
+	}
 	return identity, nil
 }
 
@@ -528,12 +534,16 @@ func (m *Manager) publicAccount(record AccountRecord) PublicAccount {
 		"last_latency_ms":       lastLatency,
 		"last_request_at":       stringValueAny(rawStats["last_request_at"]),
 	}
+	source := "manual"
+	if record.RefreshToken != "" && len(record.AuthContext) > 0 {
+		source = "oauth"
+	}
 	return PublicAccount{
 		ID:               record.ID,
 		Environment:      record.Environment,
 		EnvironmentLabel: profile.Label,
 		Authenticated:    record.AccessKeyID != "" && record.SecretAccessKey != "",
-		Source:           "oauth",
+		Source:           source,
 		ExpiresAt:        record.Expiration,
 		RefreshAvailable: record.RefreshToken != "" && len(record.AuthContext) > 0,
 		UserID:           record.UserID,

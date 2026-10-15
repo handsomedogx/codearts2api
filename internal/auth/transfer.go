@@ -50,6 +50,24 @@ type ImportCredentialsResult struct {
 	Replaced int
 }
 
+type plainCredentialInput struct {
+	ID              string         `json:"id"`
+	Environment     string         `json:"environment"`
+	AccessKeyID     string         `json:"access_key_id"`
+	SecretAccessKey string         `json:"secret_access_key"`
+	SecurityToken   string         `json:"security_token"`
+	Expiration      string         `json:"expiration"`
+	RefreshToken    string         `json:"refresh_token"`
+	Email           string         `json:"email"`
+	AuthContext     map[string]any `json:"auth_context"`
+	Credentials     *Credentials   `json:"credentials"`
+}
+
+type ImportPlainCredentialsResult struct {
+	Imported int
+	Updated  int
+}
+
 func (m *Manager) ExportCredentials(path, password string) (int, error) {
 	if !securestore.Available() {
 		return 0, fmt.Errorf("secure credential storage is unavailable on this platform")
@@ -184,6 +202,208 @@ func (m *Manager) ImportCredentials(path, password string, replace bool) (Import
 		}
 	}
 	return result, nil
+}
+
+func (m *Manager) ImportPlainCredentials(path string) (ImportPlainCredentialsResult, error) {
+	if !securestore.Available() {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("secure credential storage is unavailable on this platform")
+	}
+	if strings.TrimSpace(path) == "" {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("input path is required")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("open plaintext credential file: %w", err)
+	}
+	if info.Size() > credentialBundleMaxSize {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("plaintext credential file is too large")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("read plaintext credential file: %w", err)
+	}
+	inputs, err := parsePlainCredentialInputs(raw)
+	if err != nil {
+		return ImportPlainCredentialsResult{}, err
+	}
+	if len(inputs) == 0 {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("plaintext credential file contains no accounts")
+	}
+	if len(inputs) > 10_000 {
+		return ImportPlainCredentialsResult{}, fmt.Errorf("plaintext credential file contains too many accounts")
+	}
+
+	type importPlan struct {
+		record  AccountRecord
+		updated bool
+	}
+	plans := make([]importPlan, 0, len(inputs))
+	seenIdentity := map[string]struct{}{}
+	seenID := map[string]struct{}{}
+	for index, input := range inputs {
+		input.normalizeNestedCredentials()
+		profile, err := m.Settings.Profile(strings.TrimSpace(input.Environment))
+		if err != nil {
+			return ImportPlainCredentialsResult{}, fmt.Errorf("account %d has invalid environment: %w", index+1, err)
+		}
+		input.Environment = profile.Environment
+		input.AccessKeyID = strings.TrimSpace(input.AccessKeyID)
+		input.SecretAccessKey = strings.TrimSpace(input.SecretAccessKey)
+		input.SecurityToken = strings.TrimSpace(input.SecurityToken)
+		input.RefreshToken = strings.TrimSpace(input.RefreshToken)
+		input.Expiration = strings.TrimSpace(input.Expiration)
+		if input.AccessKeyID == "" || input.SecretAccessKey == "" {
+			return ImportPlainCredentialsResult{}, fmt.Errorf("account %d is missing access_key_id or secret_access_key", index+1)
+		}
+
+		credentials := Credentials{
+			AccessKeyID:     input.AccessKeyID,
+			SecretAccessKey: input.SecretAccessKey,
+			SecurityToken:   input.SecurityToken,
+			Expiration:      input.Expiration,
+		}
+		identity, err := m.queryIdentity(profile, credentials)
+		if err != nil {
+			return ImportPlainCredentialsResult{}, fmt.Errorf("account %d credential verification failed: %w", index+1, err)
+		}
+		identityKey := profile.Environment + "\x00" + identity.AccountID + "\x00" + identity.PrincipalID
+		if _, ok := seenIdentity[identityKey]; ok {
+			return ImportPlainCredentialsResult{}, fmt.Errorf("plaintext credential file contains the same CodeArts identity more than once at account %d", index+1)
+		}
+		seenIdentity[identityKey] = struct{}{}
+
+		record := AccountRecord{
+			Environment:     profile.Environment,
+			AccessKeyID:     input.AccessKeyID,
+			SecretAccessKey: input.SecretAccessKey,
+			SecurityToken:   input.SecurityToken,
+			Expiration:      input.Expiration,
+			RefreshToken:    input.RefreshToken,
+			DomainID:        identity.AccountID,
+			UserID:          identity.PrincipalID,
+			PrincipalURN:    identity.PrincipalURN,
+			AuthContext:     cloneMap(input.AuthContext),
+			Stats:           map[string]any{},
+			Health:          map[string]any{},
+			ModelHealth:     map[string]any{},
+			UpdatedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		if idx := strings.LastIndex(identity.PrincipalURN, ":"); idx >= 0 {
+			record.UserName = identity.PrincipalURN[idx+1:]
+		}
+		if email, err := m.queryUserEmail(credentials, identity); err == nil {
+			record.Email = strings.TrimSpace(email)
+		}
+		if record.Email == "" {
+			record.Email = strings.TrimSpace(input.Email)
+		}
+
+		updated := false
+		if existing, found, err := m.findAccountByIdentity(record.Environment, record.DomainID, record.UserID); err != nil {
+			return ImportPlainCredentialsResult{}, err
+		} else if found {
+			record.ID = existing.ID
+			if record.Email == "" {
+				record.Email = existing.Email
+			}
+			if record.RefreshToken == "" {
+				record.RefreshToken = existing.RefreshToken
+			}
+			if len(record.AuthContext) == 0 {
+				record.AuthContext = existing.AuthContext
+			}
+			record.Stats = existing.Stats
+			record.Health = existing.Health
+			record.ModelHealth = existing.ModelHealth
+			updated = true
+		} else {
+			record.ID = strings.TrimSpace(input.ID)
+			if record.ID == "" {
+				record.ID, err = randomHex(16)
+				if err != nil {
+					return ImportPlainCredentialsResult{}, fmt.Errorf("generate account id: %w", err)
+				}
+			}
+			if strings.ContainsAny(record.ID, `\\/:*?"<>|`) {
+				return ImportPlainCredentialsResult{}, fmt.Errorf("account %d has invalid id %q", index+1, record.ID)
+			}
+			exists, err := m.accountExists(record.ID)
+			if err != nil {
+				return ImportPlainCredentialsResult{}, err
+			}
+			if exists {
+				return ImportPlainCredentialsResult{}, fmt.Errorf("account id %s already exists for a different identity", record.ID)
+			}
+		}
+		if _, ok := seenID[record.ID]; ok {
+			return ImportPlainCredentialsResult{}, fmt.Errorf("plaintext credential file resolves multiple accounts to id %s", record.ID)
+		}
+		seenID[record.ID] = struct{}{}
+		plans = append(plans, importPlan{record: record, updated: updated})
+	}
+
+	result := ImportPlainCredentialsResult{}
+	for _, plan := range plans {
+		if err := m.saveAccount(plan.record); err != nil {
+			return result, fmt.Errorf("save imported account %s: %w", plan.record.ID, err)
+		}
+		if plan.updated {
+			result.Updated++
+		} else {
+			result.Imported++
+		}
+	}
+	return result, nil
+}
+
+func parsePlainCredentialInputs(raw []byte) ([]plainCredentialInput, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, fmt.Errorf("plaintext credential file is empty")
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var inputs []plainCredentialInput
+		if err := json.Unmarshal([]byte(trimmed), &inputs); err != nil {
+			return nil, fmt.Errorf("decode plaintext credential array: %w", err)
+		}
+		return inputs, nil
+	}
+	var wrapper struct {
+		Accounts json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &wrapper); err != nil {
+		return nil, fmt.Errorf("decode plaintext credential file: %w", err)
+	}
+	if len(wrapper.Accounts) > 0 && string(wrapper.Accounts) != "null" {
+		var inputs []plainCredentialInput
+		if err := json.Unmarshal(wrapper.Accounts, &inputs); err != nil {
+			return nil, fmt.Errorf("decode plaintext credential accounts: %w", err)
+		}
+		return inputs, nil
+	}
+	var input plainCredentialInput
+	if err := json.Unmarshal([]byte(trimmed), &input); err != nil {
+		return nil, fmt.Errorf("decode plaintext credential account: %w", err)
+	}
+	return []plainCredentialInput{input}, nil
+}
+
+func (p *plainCredentialInput) normalizeNestedCredentials() {
+	if p.Credentials == nil {
+		return
+	}
+	if strings.TrimSpace(p.AccessKeyID) == "" {
+		p.AccessKeyID = p.Credentials.AccessKeyID
+	}
+	if strings.TrimSpace(p.SecretAccessKey) == "" {
+		p.SecretAccessKey = p.Credentials.SecretAccessKey
+	}
+	if strings.TrimSpace(p.SecurityToken) == "" {
+		p.SecurityToken = p.Credentials.SecurityToken
+	}
+	if strings.TrimSpace(p.Expiration) == "" {
+		p.Expiration = p.Credentials.Expiration
+	}
 }
 
 func (m *Manager) credentialAccountIDs() ([]string, error) {

@@ -251,7 +251,15 @@ Advanced deployments may set `CODEARTS2API_API_KEY` as an environment override. 
 
 `CODEARTS2API_DATA_DIR` can override the platform default runtime-data directory. More specific storage variables such as `CODEARTS_ACCOUNTS_DIR` and `CODEARTS_REQUEST_LOGS_FILE` still take precedence when explicitly configured. No environment variable is required for normal single-user Windows or Linux use.
 
-There is no manual AK/SK credential fallback: CodeArts credentials enter the pool only through the supported OAuth account flow.
+Plaintext credentials can also be imported explicitly when you already have valid Huawei credentials:
+
+```powershell
+codearts2api credentials import-plain -i accounts.json
+```
+
+The input can be one account object, an array, or `{"accounts":[...]}`. Each account must include `environment`, `access_key_id`, and `secret_access_key`; temporary credentials should also include `security_token` and `expiration`. `refresh_token` and `auth_context` are optional, but without the refresh context the account cannot automatically renew after temporary credentials expire. Nested OAuth token-response objects using `credentials: { ... }` are also accepted.
+
+Before anything is stored, `codearts2api` verifies each credential set with Huawei caller identity, derives the real Domain/User identity, best-effort resolves the account email, and deduplicates against existing accounts. The imported secrets are then written through the normal platform secure store (DPAPI on Windows, AES-256-GCM on Linux). The source JSON is never copied or rewritten, so protect or delete that plaintext file yourself when it is no longer needed.
 
 ## Tests
 

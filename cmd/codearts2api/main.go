@@ -112,11 +112,37 @@ func runCredentialsCommand(args []string) error {
 		}
 		fmt.Println(".")
 		return nil
+	case "import-plain":
+		fs := flag.NewFlagSet("credentials import-plain", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		input := fs.String("input", "", "plaintext credential JSON path")
+		fs.StringVar(input, "i", "", "plaintext credential JSON path")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*input) == "" {
+			return fmt.Errorf("--input is required")
+		}
+		manager, err := credentialManager()
+		if err != nil {
+			return err
+		}
+		result, err := manager.ImportPlainCredentials(*input)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Imported %d new account(s)", result.Imported)
+		if result.Updated > 0 {
+			fmt.Printf(" and updated %d existing account(s)", result.Updated)
+		}
+		fmt.Println(".")
+		fmt.Println("The source JSON is not copied or modified. Protect or delete the plaintext source file yourself when it is no longer needed.")
+		return nil
 	case "help", "--help", "-h":
 		printCredentialsUsage()
 		return nil
 	default:
-		return fmt.Errorf("unknown credentials command %q; expected export or import", args[0])
+		return fmt.Errorf("unknown credentials command %q; expected export, import, or import-plain", args[0])
 	}
 }
 
@@ -163,13 +189,17 @@ func printUsage() {
 	fmt.Println("  codearts2api                         Start the local gateway")
 	fmt.Println("  codearts2api credentials export     Export all accounts to a password-encrypted migration bundle")
 	fmt.Println("  codearts2api credentials import     Import a migration bundle and re-encrypt for this machine")
+	fmt.Println("  codearts2api credentials import-plain  Verify plaintext credentials and encrypt them for this machine")
 }
 
 func printCredentialsUsage() {
 	fmt.Println("Credential migration:")
 	fmt.Println("  codearts2api credentials export [-o accounts.enc]")
 	fmt.Println("  codearts2api credentials import -i accounts.enc [--replace]")
+	fmt.Println("  codearts2api credentials import-plain -i accounts.json")
 	fmt.Println()
 	fmt.Println("The password is prompted without echo. For automation, set CODEARTS2API_MIGRATION_PASSWORD.")
 	fmt.Println("Import refuses matching account ids unless --replace is explicitly supplied.")
+	fmt.Println("Plain import accepts one account object, an account array, or {\"accounts\":[...]}; each account requires environment, access_key_id, and secret_access_key.")
+	fmt.Println("Plain credentials are verified with Huawei caller identity and then immediately protected with the local secure store.")
 }
